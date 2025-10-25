@@ -1,0 +1,24 @@
+contact_links:
+  - name: GLPI-Agent Official and Public FAQ
+    url: https://faq.teclib.com/02_FAQ/Agent/
+  - name: GLPI-Agent Discussions
+    url: https://github.com/glpi-project/glpi-agent/discussions/
+    about: You can ask questions and find answers on our github Discussionsn section.
+  - name: Feature request ? Open Ideas discussion
+    url: https://github.com/glpi-project/glpi-agent/discussions/new?category=ideas
+    about: Suggest an idea for this project
+  - name: Help wanted ? Open Q&A discussion
+    url: https://github.com/glpi-project/glpi-agent/discussions/new?category=q-a
+    about: I need help to use GLPI agent
+  - name: Professional Support
+    url: https://services.glpi-network.com/
+    about: Professional support is available through GLPI Network subscription
+  - name: GLPI Community Support
+    url: https://forum.glpi-project.org/
+    about: You can ask questions and find answers on the forum.
+  - name: GLPI agent documentation
+    url: https://glpi-agent.readthedocs.io/en/latest/
+    about: Don't forget to read GLPI agent online documentation
+  - name: GLPI project Telegram channel
+    url: https://t.me/glpien
+    about: A fast GLPI community support media
