@@ -1,55 +1,32 @@
-package GLPI::Agent::SNMP::MibSupport::Qnap;
+# qnap_mib.py
+from typing import Optional
+from glpi_agent_snmp_template import MibSupportTemplate
+from glpi_agent_tools import get_regexp_oid_match
 
-use strict;
-use warnings;
+# Constants
+PRIORITY = 5
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
+# NAS-MIB
+QNAP_STORAGE = '.1.3.6.1.4.1.24681'
+ES_STORAGE_SYSTEM = QNAP_STORAGE + '.2'
+ES_SYSTEM_INFO = ES_STORAGE_SYSTEM + '.2'
+ES_MODEL_NAME = ES_SYSTEM_INFO + '.12.0'
+ES_HOST_NAME = ES_SYSTEM_INFO + '.13.0'
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
 
-use constant    priority => 5;
+class Qnap(MibSupportTemplate):
+    mib_support = [
+        {"name": "qnap-storage", "sysobjectid": QNAP_STORAGE},
+        {"name": "qnap-model", "privateoid": ES_MODEL_NAME}
+    ]
 
-# See NAS-MIB
-use constant    qnap_storage        => '.1.3.6.1.4.1.24681'  ;
-use constant    es_storageSystem    => qnap_storage.'.2'     ;
-use constant    es_SystemInfo       => es_storageSystem.'.2' ;
-use constant    es_ModelName        => es_SystemInfo.'.12.0' ;
-use constant    es_HostName         => es_SystemInfo.'.13.0' ;
+    @staticmethod
+    def get_type() -> str:
+        return 'STORAGE'
 
-our $mibSupport = [
-    {
-        name        => "qnap-storage",
-        sysobjectid => qnap_storage,
-    },
-    {
-        name        => "qnap-model",
-        privateoid  => es_ModelName,
-    }
-];
+    def get_model(self) -> Optional[str]:
+        return self.get(ES_MODEL_NAME)
 
-sub getType {
-    return 'STORAGE';
-}
-
-sub getModel {
-    my ($self) = @_;
-
-    return $self->get(es_ModelName);
-}
-
-sub getManufacturer {
-    return 'Qnap';
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::QNAP - Inventory module for QNAP NAS
-
-=head1 DESCRIPTION
-
-The module enhances QNAP NAS support.
+    @staticmethod
+    def get_manufacturer() -> str:
+        return 'Qnap'
