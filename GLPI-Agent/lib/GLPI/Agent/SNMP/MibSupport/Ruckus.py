@@ -1,63 +1,91 @@
-package GLPI::Agent::SNMP::MibSupport::Ruckus;
+"""
+GLPI Agent SNMP MibSupport for Ruckus devices
 
-use strict;
-use warnings;
+This module provides inventory support for Ruckus devices via SNMP.
+It extracts model, serial number, and firmware information using Ruckus MIBs.
+"""
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
+from typing import Optional, List, Dict, Any
+from glpi_agent.snmp.mib_support_template import MibSupportTemplate
+from glpi_agent.tools import Tools
+from glpi_agent.tools.snmp import SNMPTools
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
 
-use constant    enterprises => '.1.3.6.1.4.1' ;
+class RuckusMibSupport(MibSupportTemplate):
+    """
+    Inventory module for Ruckus devices
+    
+    This module enhances Ruckus devices support by providing
+    model, serial number, and firmware information retrieval.
+    """
+    
+    # OID Constants
+    ENTERPRISES = '.1.3.6.1.4.1'
+    
+    # RUCKUS-ROOT-MIB
+    RUCKUS_ROOT_MIB = f'{ENTERPRISES}.25053'
+    RUCKUS_PRODUCTS = f'{RUCKUS_ROOT_MIB}.3'
+    RUCKUS_COMMON_HW_INFO_MODULE = f'{RUCKUS_ROOT_MIB}.1.1.2'
+    RUCKUS_COMMON_SW_INFO_MODULE = f'{RUCKUS_ROOT_MIB}.1.1.3'
+    
+    # RUCKUS-HWINFO-MIB
+    RUCKUS_HW_INFO = f'{RUCKUS_COMMON_HW_INFO_MODULE}.1.1.1'
+    RUCKUS_HW_INFO_MODEL_NUMBER = f'{RUCKUS_HW_INFO}.1.0'
+    RUCKUS_HW_INFO_SERIAL_NUMBER = f'{RUCKUS_HW_INFO}.2.0'
+    
+    # RUCKUS-SWINFO-MIB
+    RUCKUS_SW_INFO = f'{RUCKUS_COMMON_SW_INFO_MODULE}.1.1.1'
+    RUCKUS_SW_REVISION = f'{RUCKUS_SW_INFO}.1.1.3.1'
+    
+    @classmethod
+    def get_mib_support(cls) -> List[Dict[str, Any]]:
+        """
+        Returns the MIB support configuration for Ruckus devices
+        
+        Returns:
+            List of dictionaries containing MIB support configuration
+        """
+        return [
+            {
+                'name': 'ruckus',
+                'sysobjectid': SNMPTools.get_regexp_oid_match(cls.RUCKUS_PRODUCTS)
+            }
+        ]
+    
+    def get_model(self) -> Optional[str]:
+        """
+        Retrieve the device model number
+        
+        Returns:
+            Model number string or None if not available
+        """
+        return self.get(self.RUCKUS_HW_INFO_MODEL_NUMBER)
+    
+    def get_serial(self) -> Optional[str]:
+        """
+        Retrieve the device serial number
+        
+        Returns:
+            Serial number string or None if not available
+        """
+        return self.get(self.RUCKUS_HW_INFO_SERIAL_NUMBER)
+    
+    def get_firmware(self) -> Optional[str]:
+        """
+        Retrieve the device firmware version
+        
+        Returns:
+            Firmware version string or None if not available
+        """
+        return self.get(self.RUCKUS_SW_REVISION)
 
-# RUCKUS-ROOT-MIB
-use constant    ruckusRootMIB               => enterprises . '.25053' ;
-use constant    ruckusProducts              => ruckusRootMIB . '.3';
-use constant    ruckusCommonHwInfoModule    => ruckusRootMIB . '.1.1.2';
-use constant    ruckusCommonSwInfoModule    => ruckusRootMIB . '.1.1.3';
 
-# RUCKUS-HWINFO-MIB
-use constant    ruckusHwInfo                => ruckusCommonHwInfoModule . '.1.1.1';
-use constant    ruckusHwInfoModelNumber     => ruckusHwInfo . '.1.0';
-use constant    ruckusHwInfoSerialNumber    => ruckusHwInfo . '.2.0';
+# Module-level variable for backward compatibility
+mib_support = RuckusMibSupport.get_mib_support()
 
-# RUCKUS-SWINFO-MIB
-use constant    ruckusSwInfo                => ruckusCommonSwInfoModule . '.1.1.1';
-use constant    ruckusSwRevision            => ruckusSwInfo . '.1.1.3.1';
 
-our $mibSupport = [
-    {
-        name        => "ruckus",
-        sysobjectid => getRegexpOidMatch(ruckusProducts)
-    }
-];
-
-sub getModel {
-    my ($self) = @_;
-
-    return $self->get(ruckusHwInfoModelNumber);
-}
-
-sub getSerial {
-    my ($self) = @_;
-
-    return $self->get(ruckusHwInfoSerialNumber);
-}
-
-sub getFirmware {
-    my ($self) = @_;
-
-    return $self->get(ruckusSwRevision);
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::Ruckus - Inventory module for Ruckus devices
-
-=head1 DESCRIPTION
-
-The module enhances Ruckus devices support.
+# Module metadata
+__all__ = ['RuckusMibSupport', 'mib_support']
+__version__ = '1.0.0'
+__author__ = 'GLPI Agent'
+__description__ = 'Inventory module for Ruckus devices'
