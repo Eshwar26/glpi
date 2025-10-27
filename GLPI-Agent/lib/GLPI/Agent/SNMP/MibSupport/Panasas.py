@@ -1,75 +1,50 @@
-package GLPI::Agent::SNMP::MibSupport::Panasas;
+# panasas_mib.py
+from typing import Optional
 
-use strict;
-use warnings;
+from glpi_agent_snmp_template import MibSupportTemplate
+from glpi_agent_tools import get_canonical_string, get_regexp_oid_match, hex2char
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
+# Panasas MIB constants
+PANASAS = '.1.3.6.1.4.1.10159'
+PAN_HW = PANASAS + '.1.2'
+PAN_FS = PANASAS + '.1.3'
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
+# PANASAS-SYSTEM-MIB-V1
+PAN_CLUSTER_NAME = PAN_FS + '.2.1.1.0'
+PAN_CLUSTER_MANAGEMENT_ADDRESS = PAN_FS + '.2.1.2.0'
+PAN_CLUSTER_REPSET_ENTRY_IPADDR = PAN_FS + '.2.1.3.1.2'
+PAN_CLUSTER_REPSET_ENTRY_BLADE_HW_SN = PAN_FS + '.2.1.3.1.3'
 
-# See PANASAS-ROOT-MIB
 
-use constant    panasas => '.1.3.6.1.4.1.10159' ;
-use constant    panHw   => panasas . '.1.2' ;
-use constant    panFs   => panasas . '.1.3' ;
+class Panasas(MibSupportTemplate):
+    mib_support = [
+        {"name": "panasas-panfs", "sysobjectid": get_regexp_oid_match(PAN_FS + '.0')}
+    ]
 
-# See PANASAS-SYSTEM-MIB-V1
+    def get_serial(self) -> Optional[str]:
+        device = self.device
+        if not device:
+            return None
 
-use constant    panClusterName                  => panFs . '.2.1.1.0' ;
-use constant    panClusterManagementAddress     => panFs . '.2.1.2.0' ;
-use constant    panClusterRepsetEntryIpAddr     => panFs . '.2.1.3.1.2' ;
-use constant    panClusterRepsetEntryBladeHwSN  => panFs . '.2.1.3.1.3' ;
+        # Get the IP from session hostname or default to cluster management address
+        ip = getattr(device, "snmp", None) and device.snmp.peer_address() \
+            or self.get(PAN_CLUSTER_MANAGEMENT_ADDRESS)
 
-our $mibSupport = [
-    {
-        name        => "panasas-panfs",
-        sysobjectid => getRegexpOidMatch(panFs.'.0')
-    }
-];
+        if not ip:
+            return None
 
-sub getSerial {
-    my ($self) = @_;
+        # Find member IP index to select the related S/N
+        cloud_ips = self.walk(PAN_CLUSTER_REPSET_ENTRY_IPADDR) or {}
+        for index, member_ip in cloud_ips.items():
+            if member_ip == ip:
+                serial = self.get(f"{PAN_CLUSTER_REPSET_ENTRY_BLADE_HW_SN}.{index}")
+                return hex2char(serial) if serial else None
 
-    my $device = $self->device
-        or return;
+    def run(self):
+        device = self.device
+        if not device:
+            return
 
-    # Get the ip from session hostname or default to cluster management address
-    my $ip = $device->{snmp}->peer_address()
-        || $self->get(panClusterManagementAddress);
-
-    return unless $ip;
-
-    # Find member ip index to select the related S/N
-    my $cloudips = $self->walk(panClusterRepsetEntryIpAddr);
-    foreach my $index (keys(%{$cloudips})) {
-        if ($cloudips->{$index} eq $ip) {
-            my $serial = $self->get(panClusterRepsetEntryBladeHwSN.'.'.$index);
-            return hex2char($serial);
-        }
-    }
-}
-
-sub run {
-    my ($self) = @_;
-
-    my $device = $self->device
-        or return;
-
-    my $name = $self->get(panClusterName)
-        or return;
-
-    $device->{INFO}->{NAME} = getCanonicalString($name);
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::Panasas - Inventory module for Panasas PanFS
-
-=head1 DESCRIPTION
-
-The module enhances Panasas PanFS device support.
+        name = self.get(PAN_CLUSTER_NAME)
+        if name:
+            device.INFO['NAME'] = get_canonical_string(name)
