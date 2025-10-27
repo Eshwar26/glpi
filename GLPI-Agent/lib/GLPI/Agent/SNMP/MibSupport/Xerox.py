@@ -1,80 +1,89 @@
-package GLPI::Agent::SNMP::MibSupport::Xerox;
+# GLPI/Agent/SNMP/MibSupport/Xerox.py
 
-use strict;
-use warnings;
+from GLPI.Agent.SNMP.MibSupportTemplate import MibSupportTemplate
+from GLPI.Agent.Tools.SNMP import getRegexpOidMatch
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
-
-use constant    enterprises => '.1.3.6.1.4.1' ;
-
-# XEROX-COMMON-MIB
-use constant    xerox       => enterprises . '.253';
-use constant    xeroxCommonMIB  => xerox . '.8';
+# SNMP OID constants
+enterprises = '.1.3.6.1.4.1'
+xerox = enterprises + '.253'
+xeroxCommonMIB = xerox + '.8'
 
 # XEROX-HOST-RESOURCES-EXT-MIB
-use constant    xcmHrDevDetailEntry => xeroxCommonMIB . '.53.13.2.1' ;
+xcmHrDevDetailEntry = xeroxCommonMIB + '.53.13.2.1'
 
-use constant    xeroxTotalPrint => xcmHrDevDetailEntry . '.6.1.20.1' ;
-use constant    xeroxColorPrint => xcmHrDevDetailEntry . '.6.1.20.33' ;
-use constant    xeroxBlackPrint => xcmHrDevDetailEntry . '.6.1.20.34' ;
-use constant    xeroxColorCopy  => xcmHrDevDetailEntry . '.6.11.20.25' ;
-use constant    xeroxBlackCopy  => xcmHrDevDetailEntry . '.6.11.20.3' ;
-use constant    xeroxScanSentByEmail    => xcmHrDevDetailEntry . '.6.10.20.11' ;
-use constant    xeroxScanSavedOnNetwork => xcmHrDevDetailEntry . '.6.10.20.12' ;
+xeroxTotalPrint = xcmHrDevDetailEntry + '.6.1.20.1'
+xeroxColorPrint = xcmHrDevDetailEntry + '.6.1.20.33'
+xeroxBlackPrint = xcmHrDevDetailEntry + '.6.1.20.34'
+xeroxColorCopy = xcmHrDevDetailEntry + '.6.11.20.25'
+xeroxBlackCopy = xcmHrDevDetailEntry + '.6.11.20.3'
+xeroxScanSentByEmail = xcmHrDevDetailEntry + '.6.10.20.11'
+xeroxScanSavedOnNetwork = xcmHrDevDetailEntry + '.6.10.20.12'
 
-our $mibSupport = [
+
+# MIB Support registration
+mibSupport = [
     {
-        name        => "xerox-printer",
-        sysobjectid => getRegexpOidMatch(xeroxCommonMIB)
+        "name": "xerox-printer",
+        "sysobjectid": getRegexpOidMatch(xeroxCommonMIB)
     }
-];
+]
 
-sub run {
-    my ($self) = @_;
 
-    my $device = $self->device
-        or return;
+class Xerox(MibSupportTemplate):
+    """Inventory module for Xerox printers (extended SNMP MIB support)."""
 
-    my %mapping = (
-        PRINTCOLOR  => xeroxColorPrint,
-        PRINTBLACK  => xeroxBlackPrint,
-        PRINTTOTAL  => xeroxTotalPrint,
-        COPYCOLOR   => xeroxColorCopy,
-        COPYBLACK   => xeroxBlackCopy,
-        SCANNED     => [
-            xeroxScanSentByEmail,
-            xeroxScanSavedOnNetwork,
-        ]
-    );
+    def run(self):
+        device = getattr(self, "device", None)
+        if not device:
+            return
 
-    foreach my $counter (sort keys(%mapping)) {
-        my $count = 0;
-        if (ref($mapping{$counter})) {
-            map { $count += $self->get($_) // 0 } @{$mapping{$counter}}
-        } else {
-            $count = $self->get($mapping{$counter});
+        mapping = {
+            "PRINTCOLOR": xeroxColorPrint,
+            "PRINTBLACK": xeroxBlackPrint,
+            "PRINTTOTAL": xeroxTotalPrint,
+            "COPYCOLOR": xeroxColorCopy,
+            "COPYBLACK": xeroxBlackCopy,
+            "SCANNED": [
+                xeroxScanSentByEmail,
+                xeroxScanSavedOnNetwork,
+            ]
         }
-        next unless $count && $count =~ /^\d+$/;
-        $device->{PAGECOUNTERS}->{$counter} = $count;
-    }
 
-    # Set COPYTOTAL if copy found and no dedicated counter is defined
-    if ($device->{PAGECOUNTERS}->{COPYCOLOR} || $device->{PAGECOUNTERS}->{COPYBLACK}) {
-        $device->{PAGECOUNTERS}->{COPYTOTAL} = ($device->{PAGECOUNTERS}->{COPYBLACK} // 0) + ($device->{PAGECOUNTERS}->{COPYCOLOR} // 0);
-    }
-}
+        device.setdefault("PAGECOUNTERS", {})
 
-1;
+        for counter, oid in sorted(mapping.items()):
+            count = 0
 
-__END__
+            # Handle multiple OIDs (e.g., for SCANNED)
+            if isinstance(oid, list):
+                for o in oid:
+                    val = self.get(o)
+                    count += int(val) if val and str(val).isdigit() else 0
+            else:
+                val = self.get(oid)
+                if val and str(val).isdigit():
+                    count = int(val)
 
-=head1 NAME
+            # Skip invalid or zero counts
+            if not count:
+                continue
 
-GLPI::Agent::SNMP::MibSupport::Xerox - Inventory module for Xerox Printers
+            device["PAGECOUNTERS"][counter] = count
 
-=head1 DESCRIPTION
+        # Define COPYTOTAL if partial counts exist
+        copy_color = device["PAGECOUNTERS"].get("COPYCOLOR", 0)
+        copy_black = device["PAGECOUNTERS"].get("COPYBLACK", 0)
+        if copy_color or copy_black:
+            device["PAGECOUNTERS"]["COPYTOTAL"] = copy_color + copy_black
 
-The module enhances Xerox printers devices support.
+
+# Documentation equivalent to POD
+"""
+NAME
+    GLPI.Agent.SNMP.MibSupport.Xerox - Inventory module for Xerox Printers
+
+DESCRIPTION
+    This module enhances Xerox printer support by retrieving print, copy,
+    and scan page counters from SNMP OIDs, and aggregates the total copy count.
+"""
