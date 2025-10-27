@@ -1,167 +1,129 @@
-package GLPI::Agent::SNMP::MibSupport::Quantum;
+# quantum_mib.py
+from typing import Optional, List, Dict
+from glpi_agent_snmp_template import MibSupportTemplate
+from glpi_agent_tools import get_canonical_string, get_regexp_oid_match, walk, trim_whitespace
 
-use strict;
-use warnings;
-
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
-
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
-
-use constant    enterprises => '.1.3.6.1.4.1' ;
-
-use constant    quantum  => enterprises . '.3764';
+ENTERPRISES = '.1.3.6.1.4.1'
+QUANTUM = ENTERPRISES + '.3764'
 
 # ADIC-INTELLIGENT-STORAGE-MIB
-use constant    productAgentInfo    => quantum . '.1.1.10';
-use constant    components          => quantum . '.1.1.30';
+PRODUCT_AGENT_INFO = QUANTUM + '.1.1.10'
+COMPONENTS = QUANTUM + '.1.1.30'
 
-use constant    productMibVersion       => productAgentInfo . '.1.0';
-use constant    productSnmpAgentVersion => productAgentInfo . '.2.0';
-use constant    productName             => productAgentInfo . '.3.0';
-use constant    productVendor           => productAgentInfo . '.6.0';
-use constant    productSerialNumber     => productAgentInfo . '.10.0';
+PRODUCT_MIB_VERSION = PRODUCT_AGENT_INFO + '.1.0'
+PRODUCT_SNMP_AGENT_VERSION = PRODUCT_AGENT_INFO + '.2.0'
+PRODUCT_NAME = PRODUCT_AGENT_INFO + '.3.0'
+PRODUCT_VENDOR = PRODUCT_AGENT_INFO + '.6.0'
+PRODUCT_SERIAL_NUMBER = PRODUCT_AGENT_INFO + '.10.0'
 
-use constant    componentType               => components . '.10.1.2';
-use constant    componentDisplayName        => components . '.10.1.3';
-use constant    componentSn                 => components . '.10.1.7';
-use constant    componentFirmwareVersion    => components . '.10.1.11';
-use constant    componentIpAddress          => components . '.10.1.17';
+COMPONENT_TYPE = COMPONENTS + '.10.1.2'
+COMPONENT_DISPLAY_NAME = COMPONENTS + '.10.1.3'
+COMPONENT_SN = COMPONENTS + '.10.1.7'
+COMPONENT_FIRMWARE_VERSION = COMPONENTS + '.10.1.11'
+COMPONENT_IP_ADDRESS = COMPONENTS + '.10.1.17'
 
-our $mibSupport = [
-    {
-        name        => "quantum",
-        sysobjectid => getRegexpOidMatch(quantum)
-    }
-];
 
-sub getFirmware {
-    my ($self) = @_;
+class Quantum(MibSupportTemplate):
+    mib_support = [
+        {"name": "quantum", "sysobjectid": get_regexp_oid_match(QUANTUM)}
+    ]
 
-    return getCanonicalString($self->get(productSnmpAgentVersion));
-}
+    def get_firmware(self) -> Optional[str]:
+        return get_canonical_string(self.get(PRODUCT_SNMP_AGENT_VERSION))
 
-sub _index {
-    my ($key) = @_;
-    my ($index) = $key =~ /(\d+)$/
-        or return 0;
-    return int($index)
-}
+    @staticmethod
+    def _index(key: str) -> int:
+        import re
+        match = re.search(r'(\d+)$', key)
+        return int(match.group(1)) if match else 0
 
-sub getComponents {
-    my ($self) = @_;
+    def get_components(self) -> List[Dict]:
+        device = self.device
+        if not device:
+            return []
 
-    my $device = $self->device
-        or return;
-
-    my %types = (
-        1, "mcb",       # Management control blade
-        2, "cmb",       # Control management blade
-        3, "ioblade",   # Fibre Channel I/O blade
-        4, "rcu",       # Robotics control unit
-        5, "chassis",   # Network chassis
-        6, "control",   # Control module
-        7, "expansion", # Expansion module
-        8, "psu",       # PowerSupply
-    );
-
-    my $types = $self->walk(componentType);
-    my $names = $self->walk(componentDisplayName);
-    my $SNs   = $self->walk(componentSn);
-    my $FWs   = $self->walk(componentFirmwareVersion);
-    my $IPs   = $self->walk(componentIpAddress);
-
-    my @components;
-
-    foreach my $key (sort { _index($a) <=> _index($b) } keys(%{$types})) {
-        my $name = trimWhitespace(getCanonicalString($names->{$key}));
-        my $serial = trimWhitespace(getCanonicalString($SNs->{$key} // ""));
-        my $firmwareversion = trimWhitespace(getCanonicalString($FWs->{$key} // ""));
-        my $type = $types{$types->{$key}} // "unknown";
-        push @components, {
-            CONTAINEDININDEX => 0,
-            INDEX            => _index($key),
-            NAME             => $name,
-            TYPE             => $type,
-            SERIAL           => $serial,
-            FIRMWARE         => $firmwareversion,
-            IP               => trimWhitespace(getCanonicalString($IPs->{$key} // "")),
-        };
-
-        if ($firmwareversion) {
-            my $firmware = {
-                NAME            => $name,
-                DESCRIPTION     => $name." version",
-                TYPE            => $type,
-                VERSION         => $firmwareversion,
-                MANUFACTURER    => $device->{MANUFACTURER}
-            };
-            $device->addFirmware($firmware);
+        types_mapping = {
+            1: "mcb",
+            2: "cmb",
+            3: "ioblade",
+            4: "rcu",
+            5: "chassis",
+            6: "control",
+            7: "expansion",
+            8: "psu",
         }
-    }
 
-    # adding library unit
-    if (scalar @components) {
-        unshift @components, {
-            CONTAINEDININDEX => -1,
-            INDEX            => 0,
-            TYPE             => 'storage library',
-            NAME             => $device->{MANUFACTURER}." ".$device->{MODEL}
-        };
-    }
+        types = walk(COMPONENT_TYPE)
+        names = walk(COMPONENT_DISPLAY_NAME)
+        sns = walk(COMPONENT_SN)
+        fws = walk(COMPONENT_FIRMWARE_VERSION)
+        ips = walk(COMPONENT_IP_ADDRESS)
 
-    return \@components;
-}
+        components = []
+        for key in sorted(types.keys(), key=lambda k: Quantum._index(k)):
+            name = trim_whitespace(get_canonical_string(names.get(key, "")))
+            serial = trim_whitespace(get_canonical_string(sns.get(key, "")))
+            fw_version = trim_whitespace(get_canonical_string(fws.get(key, "")))
+            type_str = types_mapping.get(types[key], "unknown")
 
-sub getManufacturer {
-    my ($self) = @_;
+            component = {
+                "CONTAINEDININDEX": 0,
+                "INDEX": Quantum._index(key),
+                "NAME": name,
+                "TYPE": type_str,
+                "SERIAL": serial,
+                "FIRMWARE": fw_version,
+                "IP": trim_whitespace(get_canonical_string(ips.get(key, "")))
+            }
 
-    return trimWhitespace(getCanonicalString($self->get(productVendor)));
-}
+            components.append(component)
 
-sub getModel {
-    my ($self) = @_;
+            if fw_version:
+                firmware = {
+                    "NAME": name,
+                    "DESCRIPTION": f"{name} version",
+                    "TYPE": type_str,
+                    "VERSION": fw_version,
+                    "MANUFACTURER": device.get("MANUFACTURER")
+                }
+                device.add_firmware(firmware)
 
-    return getCanonicalString($self->get(productName));
-}
+        # Add library unit
+        if components:
+            components.insert(0, {
+                "CONTAINEDININDEX": -1,
+                "INDEX": 0,
+                "TYPE": "storage library",
+                "NAME": f"{device.get('MANUFACTURER')} {device.get('MODEL')}"
+            })
 
-sub getSerial {
-    my ($self) = @_;
+        return components
 
-    return getCanonicalString($self->get(productSerialNumber));
-}
+    def get_manufacturer(self) -> Optional[str]:
+        return trim_whitespace(get_canonical_string(self.get(PRODUCT_VENDOR)))
 
-sub getType {
-    return "STORAGE";
-}
+    def get_model(self) -> Optional[str]:
+        return get_canonical_string(self.get(PRODUCT_NAME))
 
-sub run {
-    my ($self) = @_;
+    def get_serial(self) -> Optional[str]:
+        return get_canonical_string(self.get(PRODUCT_SERIAL_NUMBER))
 
-    my $device = $self->device
-        or return;
+    @staticmethod
+    def get_type() -> str:
+        return "STORAGE"
 
-    my $productMibVersion = getCanonicalString($self->get(productMibVersion));
-    if ($productMibVersion) {
-        my $firmware = {
-            NAME            => "$device->{MODEL} MIB",
-            DESCRIPTION     => "$device->{MODEL} MIB version",
-            TYPE            => "mib",
-            VERSION         => $productMibVersion,
-            MANUFACTURER    => $device->{MANUFACTURER}
-        };
-        $device->addFirmware($firmware);
-    }
-}
+    def run(self):
+        device = self.device
+        if not device:
+            return
 
-1;
-
-__END__
-
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::Quantum - Inventory module for Quantum devices
-
-=head1 DESCRIPTION
-
-The module enhances Quantum devices support.
+        mib_version = get_canonical_string(self.get(PRODUCT_MIB_VERSION))
+        if mib_version:
+            firmware = {
+                "NAME": f"{device.get('MODEL')} MIB",
+                "DESCRIPTION": f"{device.get('MODEL')} MIB version",
+                "TYPE": "mib",
+                "VERSION": mib_version,
+                "MANUFACTURER": device.get("MANUFACTURER")
+            }
+            device.add_firmware(firmware)
