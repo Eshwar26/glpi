@@ -1,178 +1,246 @@
-package GLPI::Agent::SNMP::MibSupport::HPNetPeripheral;
+import re
 
-use strict;
-use warnings;
+# Mock or simple implementations for GLPI Agent functions/tools
+def get_regexp_oid_match(oid):
+    # Returns a compiled regex for exact prefix match
+    return re.compile(f'^{re.escape(oid)}')
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
+def get_canonical_string(value):
+    # Mock function to get canonical string representation
+    if value is None:
+        return None
+    return str(value).strip()
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
+def get_canonical_constant(value):
+    # Mock function to get canonical constant value
+    if value is None:
+        return None
+    # In real implementation, this would handle constant normalization
+    return str(value).strip()
 
-use constant    priority => 9;
+def hex2char(value):
+    # Mock function to convert hex-encoded string to characters
+    if value is None:
+        return None
+    # In real implementation, this would handle hex to char conversion
+    # For now, just return the string as-is
+    return str(value)
+
+# Simple mock base class for compatibility
+class MibSupportTemplate:
+    def __init__(self):
+        self.device = None  # To be set externally; for testing, can be mocked
+        self.priority = 1  # Default priority
+    
+    def get(self, oid):
+        # Mock SNMP get; in real use, implement SNMP fetch
+        mock_values = {
+            '.1.3.6.1.4.1.11.2.3.9.1.1.7.0': 'MODEL: HP LaserJet Pro M404dn; SN: ABCD123456; FW: 002.2208A',
+            '.1.3.6.1.4.1.11.2.3.9.4.2.1.1.3.2.0': 'HP LaserJet Pro M404dn',  # model_name
+            '.1.3.6.1.4.1.11.2.3.9.4.2.1.1.3.3.0': 'ABCD123456',  # serial_number
+            '.1.3.6.1.4.1.11.2.3.9.4.2.1.1.3.5.0': '20220815',  # fw_rom_datecode
+            '.1.3.6.1.4.1.11.2.3.9.4.2.1.1.3.6.0': '002.2208A',  # fw_rom
+            '.1.3.6.1.4.1.11.2.3.9.4.2.1.4.1.2.5.0': '12345',  # totalEnginePageCount
+            '.1.3.6.1.4.1.11.2.3.9.4.2.1.4.1.2.7.0': '5432',   # totalColorPageCount
+            '.1.3.6.1.4.1.11.2.3.9.4.2.1.4.1.2.22.0': '2345',  # duplexPageCount
+        }
+        return mock_values.get(oid, None)
+
+# Mock Device class
+class MockDevice:
+    def __init__(self):
+        self.MANUFACTURER = None
+        self.DESCRIPTION = None
+        self.PAGECOUNTERS = {}
+
+# Constants
+PRIORITY = 9
 
 # See HP-LASERJET-COMMON-MIB / JETDIRECT3-MIB
-use constant    hpPeripheral    => '.1.3.6.1.4.1.11.2.3.9' ; # hp.nm.system.net-peripheral
-use constant    hpOfficePrinter => '.1.3.6.1.4.1.29999' ;
-use constant    hpSystem        => '.1.3.6.1.4.1.11.1' ;
-use constant    hpNetPrinter    => hpPeripheral . '.1' ;
-use constant    hpDevice        => hpPeripheral . '.4.2.1' ; # + netPML.netPMLmgmt.device
+HP_PERIPHERAL = '.1.3.6.1.4.1.11.2.3.9'  # hp.nm.system.net-peripheral
+HP_OFFICE_PRINTER = '.1.3.6.1.4.1.29999'
+HP_SYSTEM = '.1.3.6.1.4.1.11.1'
+HP_NET_PRINTER = HP_PERIPHERAL + '.1'
+HP_DEVICE = HP_PERIPHERAL + '.4.2.1'  # + netPML.netPMLmgmt.device
 
-use constant    gdStatusId      => hpNetPrinter . '.1.7.0' ;
+GD_STATUS_ID = HP_NET_PRINTER + '.1.7.0'
 
 # System id
-use constant    systemId        => hpDevice . '.1.3' ;       # + system.id
-use constant    model_name      => systemId . '.2.0' ;
-use constant    serial_number   => systemId . '.3.0' ;
-use constant    fw_rom_datecode => systemId . '.5.0' ;
-use constant    fw_rom          => systemId . '.6.0' ;
+SYSTEM_ID = HP_DEVICE + '.1.3'  # + system.id
+MODEL_NAME = SYSTEM_ID + '.2.0'
+SERIAL_NUMBER = SYSTEM_ID + '.3.0'
+FW_ROM_DATECODE = SYSTEM_ID + '.5.0'
+FW_ROM = SYSTEM_ID + '.6.0'
 
 # Status print engine: status-prt-eng
-use constant    statusPrtEngine => hpDevice . '.4.1.2' ;
-use constant    totalEnginePageCount => statusPrtEngine . '.5.0' ;
-use constant    totalColorPageCount  => statusPrtEngine . '.7.0' ;
-use constant    duplexPageCount      => statusPrtEngine . '.22.0' ;
+STATUS_PRT_ENGINE = HP_DEVICE + '.4.1.2'
+TOTAL_ENGINE_PAGE_COUNT = STATUS_PRT_ENGINE + '.5.0'
+TOTAL_COLOR_PAGE_COUNT = STATUS_PRT_ENGINE + '.7.0'
+DUPLEX_PAGE_COUNT = STATUS_PRT_ENGINE + '.22.0'
 
 # HP LaserJet Pro MFP / Marvel ASIC
-use constant    hpLaserjetProMFP => '.1.3.6.1.4.1.26696.1' ;
+HP_LASERJET_PRO_MFP = '.1.3.6.1.4.1.26696.1'
 
-my %counters = (
-    TOTAL   => totalEnginePageCount,
-    COLOR   => totalColorPageCount,
-    DUPLEX  => duplexPageCount
-);
+counters = {
+    'TOTAL': TOTAL_ENGINE_PAGE_COUNT,
+    'COLOR': TOTAL_COLOR_PAGE_COUNT,
+    'DUPLEX': DUPLEX_PAGE_COUNT
+}
 
-our $mibSupport = [
+mib_support = [
     {
-        name        => "hp-peripheral",
-        sysobjectid => getRegexpOidMatch(hpPeripheral)
+        'name': 'hp-peripheral',
+        'sysobjectid': get_regexp_oid_match(HP_PERIPHERAL)
     },
     {
-        name        => "hp-office",
-        sysobjectid => getRegexpOidMatch(hpOfficePrinter)
+        'name': 'hp-office',
+        'sysobjectid': get_regexp_oid_match(HP_OFFICE_PRINTER)
     },
     {
-        name        => "hp-system",
-        sysobjectid => getRegexpOidMatch(hpSystem)
+        'name': 'hp-system',
+        'sysobjectid': get_regexp_oid_match(HP_SYSTEM)
     },
     {
-        name        => "hp-laserjet-pro-mfp",
-        sysobjectid => getRegexpOidMatch(hpLaserjetProMFP)
+        'name': 'hp-laserjet-pro-mfp',
+        'sysobjectid': get_regexp_oid_match(HP_LASERJET_PRO_MFP)
     },
     {
-        name        => "hp-peripheral-oid",
-        privateoid  => gdStatusId
+        'name': 'hp-peripheral-oid',
+        'privateoid': GD_STATUS_ID
     }
-];
+]
 
-sub getType {
-    return 'PRINTER';
-}
+class HPNetPeripheral(MibSupportTemplate):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.priority = PRIORITY
+    
+    def get_type(self):
+        return 'PRINTER'
+    
+    def get_manufacturer(self):
+        device = self.device
+        if not device:
+            return None
+        
+        if device.MANUFACTURER:
+            return None
+        
+        return "Hewlett-Packard"
+    
+    def get_firmware(self):
+        device = self.device
+        if not device:
+            return None
+        
+        firmware = self._get_clean(FW_ROM)
+        
+        # Eventually extract EEPROM revision from device description
+        if not firmware and device.DESCRIPTION:
+            for part in device.DESCRIPTION.split(','):
+                match = re.search(r'EEPROM\s+(\S+)', part)
+                if match:
+                    return match.group(1)
+        
+        # Then try to get firmware if set in StatusId string
+        status_id = get_canonical_string(self.get(GD_STATUS_ID))
+        if status_id:
+            for part in status_id.split(';'):
+                part = part.strip()
+                match = re.match(r'^FW:\s*(.*)$', part)
+                if match:
+                    firmware = match.group(1)
+                    break
+        
+        return firmware
+    
+    def get_firmware_date(self):
+        return self._get_clean(FW_ROM_DATECODE)
+    
+    def get_serial(self):
+        sn = self.get(SERIAL_NUMBER)
+        if sn:
+            return sn
+        
+        # Then try to get serial if set in StatusId string
+        status_id = get_canonical_string(self.get(GD_STATUS_ID))
+        if status_id:
+            for part in status_id.split(';'):
+                part = part.strip()
+                match = re.match(r'^SN:\s*(.*)$', part)
+                if match:
+                    sn = match.group(1)
+                    break
+        
+        return sn
+    
+    def get_model(self):
+        # Try first to get model if set in StatusId string
+        status_id = get_canonical_string(self.get(GD_STATUS_ID))
+        if status_id:
+            for part in status_id.split(';'):
+                part = part.strip()
+                match = re.match(r'^MODEL:\s*(.*)$', part)
+                if match:
+                    return match.group(1)
+        
+        # Else try to get model from model-name string
+        return self._get_clean(MODEL_NAME)
+    
+    def run(self):
+        device = self.device
+        if not device:
+            return
+        
+        # Update counters if still not found
+        for counter_name, counter_oid in counters.items():
+            # Skip if counter already exists
+            if device.PAGECOUNTERS and device.PAGECOUNTERS.get(counter_name):
+                continue
+            
+            count = self.get(counter_oid)
+            if not count:
+                continue
+            
+            device.PAGECOUNTERS[counter_name] = get_canonical_constant(count)
+    
+    def _get_clean(self, oid):
+        clean_string = hex2char(self.get(oid))
+        
+        if clean_string is None:
+            return None
+        
+        # Remove non-printable characters
+        clean_string = re.sub(r'[^\x20-\x7E]', '', clean_string)
+        
+        return clean_string
 
-sub getManufacturer {
-    my ($self) = @_;
+# For testing/standalone run
+if __name__ == "__main__":
+    # Test instantiation
+    hp_net_peripheral = HPNetPeripheral()
+    print("Priority:", hp_net_peripheral.priority)
+    print("Type:", hp_net_peripheral.get_type())
+    
+    # Mock device for testing
+    hp_net_peripheral.device = MockDevice()
+    hp_net_peripheral.device.DESCRIPTION = "HP LaserJet, EEPROM V.35.21"
+    
+    print("Manufacturer:", hp_net_peripheral.get_manufacturer())
+    print("Firmware:", hp_net_peripheral.get_firmware())
+    print("Firmware Date:", hp_net_peripheral.get_firmware_date())
+    print("Serial:", hp_net_peripheral.get_serial())
+    print("Model:", hp_net_peripheral.get_model())
+    
+    # Test run method
+    print("\nBefore run - Page Counters:", hp_net_peripheral.device.PAGECOUNTERS)
+    hp_net_peripheral.run()
+    print("After run - Page Counters:", hp_net_peripheral.device.PAGECOUNTERS)
+    
+    print("\nModule loaded and run successfully without errors.")
 
-    my $device = $self->device
-        or return;
-
-    return if $device->{MANUFACTURER};
-
-    return "Hewlett-Packard";
-}
-
-sub getFirmware {
-    my ($self) = @_;
-
-    my $device = $self->device
-        or return;
-
-    my $firmware = $self->_getClean(fw_rom);
-
-    # Eventually extract EEPROM revision from device description
-    if (!$firmware && $device->{DESCRIPTION}) {
-        foreach (split(/,+/, $device->{DESCRIPTION})) {
-            return $1 if /EEPROM\s+(\S+)/;
-        }
-    }
-
-    # Then try to get serial if set in StatusId string
-    my $statusId = getCanonicalString($self->get(gdStatusId));
-    if ($statusId) {
-        first { /^FW:\s*(.*)$/ and $firmware = $1 } split(/\s*;\s*/, $statusId);
-    }
-
-    return $firmware;
-}
-
-sub getFirmwareDate {
-    my ($self) = @_;
-
-    return $self->_getClean(fw_rom_datecode);
-}
-
-sub getSerial {
-    my ($self) = @_;
-
-    my $sn = $self->get(serial_number);
-    return $sn if $sn;
-
-    # Then try to get serial if set in StatusId string
-    my $statusId = getCanonicalString($self->get(gdStatusId));
-    if ($statusId) {
-        first { /^SN:\s*(.*)$/ and $sn = $1 } split(/\s*;\s*/, $statusId);
-    }
-    return $sn;
-}
-
-sub getModel {
-    my ($self) = @_;
-
-    # Try first to get model if set in StatusId string
-    my $statusId = getCanonicalString($self->get(gdStatusId));
-    if ($statusId) {
-        foreach (split(/\s*;\s*/, $statusId)) {
-            return $1 if /^MODEL:\s*(.*)$/;
-        }
-    }
-
-    # Else try to get model from model-name string
-    return $self->_getClean(model_name);
-}
-
-sub run {
-    my ($self) = @_;
-
-    my $device = $self->device
-        or return;
-
-    # Update counters if still not found
-    foreach my $counter (keys %counters) {
-        next if $device->{PAGECOUNTERS} && $device->{PAGECOUNTERS}->{$counter};
-        my $count = $self->get($counters{$counter})
-            or next;
-        $device->{PAGECOUNTERS}->{$counter} = getCanonicalConstant($count);
-    }
-}
-
-sub _getClean {
-    my ($self, $oid) = @_;
-
-    my $clean_string = hex2char($self->get($oid));
-
-    return unless defined $clean_string;
-
-    $clean_string =~ s/[[:^print:]]//g;
-
-    return $clean_string;
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
+"""
 GLPI::Agent::SNMP::MibSupport::HPNetPeripheral - Inventory module for HP Printers
 
-=head1 DESCRIPTION
-
-The module enhances HP printers devices support.
+This module enhances HP printers devices support.
+"""
