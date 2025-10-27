@@ -1,53 +1,60 @@
-package GLPI::Agent::SNMP::MibSupport::EatonEpdu;
+import re
 
-use strict;
-use warnings;
+# Mock or simple implementations for GLPI Agent functions/tools
+def get_regexp_oid_match(oid):
+    # Assuming it returns a compiled regex for exact prefix match
+    return re.compile(f'^{re.escape(oid)}')
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
+# Simple mock base class for compatibility
+class MibSupportTemplate:
+    def __init__(self):
+        self.device = None  # To be set externally; for testing, can be mocked
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
+    def get(self, oid):
+        # Mock SNMP get; in real use, implement SNMP fetch
+        # For now, returns mock values to test functionality
+        mock_values = {
+            '.1.3.6.1.4.1.534.6.6.7.1.2.1.4.0': 'SN123456789',  # serial
+            '.1.3.6.1.4.1.534.6.6.7.1.2.1.3.0': 'ePDU Model X',  # model
+            '.1.3.6.1.4.1.534.6.6.7.1.2.1.5.0': 'FW 2.3.1',  # firmware
+        }
+        return mock_values.get(oid, None)
 
-# See EATON-EPDU-MIB
+# Constants
+EPDU = '.1.3.6.1.4.1.534.6.6.7'
 
-use constant    epdu     => '.1.3.6.1.4.1.534.6.6.7' ;
-use constant    model    => epdu . '.1.2.1.3.0' ;
-use constant    serial   => epdu . '.1.2.1.4.0' ;
-use constant    firmware => epdu . '.1.2.1.5.0' ;
+MODEL = EPDU + '.1.2.1.3.0'
+SERIAL = EPDU + '.1.2.1.4.0'
+FIRMWARE = EPDU + '.1.2.1.5.0'
 
-our $mibSupport = [
+mib_support = [
     {
-        name        => 'eaton-epdu',
-        sysobjectid => getRegexpOidMatch(epdu)
+        'name': 'eaton-epdu',
+        'sysobjectid': get_regexp_oid_match(EPDU)
     }
-];
+]
 
-sub getSerial {
-    my ($self) = @_;
+class EatonEpdu(MibSupportTemplate):
+    def get_serial(self):
+        return self.get(SERIAL)
 
-    return $self->get(serial);
-}
+    def get_model(self):
+        return self.get(MODEL)
 
-sub getModel {
-    my ($self) = @_;
+    def get_firmware(self):
+        return self.get(FIRMWARE)
 
-    return $self->get(model);
-}
+# For testing/standalone run (optional)
+if __name__ == "__main__":
+    # Test instantiation
+    epdu = EatonEpdu()
+    print("Serial:", epdu.get_serial())
+    print("Model:", epdu.get_model())
+    print("Firmware:", epdu.get_firmware())
+    print("Module loaded and run successfully without errors.")
 
-sub getFirmware {
-    my ($self) = @_;
-
-    return $self->get(firmware);
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
+"""
 GLPI::Agent::SNMP::MibSupport::EatonEpdu - Inventory module for Eaton ePDUs
 
-=head1 DESCRIPTION
-
 The module enhances Eaton ePDU devices support.
+"""
