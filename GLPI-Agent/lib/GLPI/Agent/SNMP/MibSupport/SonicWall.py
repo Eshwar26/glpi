@@ -1,77 +1,129 @@
-package GLPI::Agent::SNMP::MibSupport::SonicWall;
+"""
+GLPI Agent SNMP MibSupport for SonicWall devices
 
-use strict;
-use warnings;
+This module provides inventory support for SonicWall devices via SNMP.
+It extracts model, serial number, ROM version, and SonicOS firmware information.
+"""
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
+from typing import Optional, List, Dict, Any
+from glpi_agent.snmp.mib_support_template import MibSupportTemplate
+from glpi_agent.tools import Tools
+from glpi_agent.tools.snmp import SNMPTools
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
 
-use constant    mib2        => '.1.3.6.1.2.1' ;
-use constant    enterprises => '.1.3.6.1.4.1' ;
+class SonicWallMibSupport(MibSupportTemplate):
+    """
+    Inventory module for SonicWall devices
+    
+    This module enhances SonicWall devices support by providing model,
+    serial number, ROM version, and SonicOS firmware information.
+    """
+    
+    # OID Constants
+    MIB2 = '.1.3.6.1.2.1'
+    ENTERPRISES = '.1.3.6.1.4.1'
+    
+    # SonicWall MIB
+    SONICWALL = f'{ENTERPRISES}.8741'
+    
+    # SonicWall System Information
+    SNWL_SYS = f'{SONICWALL}.2.1.1'
+    
+    SNWL_SYS_MODEL = f'{SNWL_SYS}.1.0'
+    SNWL_SYS_SERIAL_NUMBER = f'{SNWL_SYS}.2.0'
+    SNWL_SYS_FIRMWARE_VERSION = f'{SNWL_SYS}.3.0'
+    SNWL_SYS_ROM_VERSION = f'{SNWL_SYS}.4.0'
+    
+    @classmethod
+    def get_mib_support(cls) -> List[Dict[str, Any]]:
+        """
+        Returns the MIB support configuration for SonicWall devices
+        
+        Returns:
+            List of dictionaries containing MIB support configuration
+        """
+        return [
+            {
+                'name': 'sonicwall',
+                'sysobjectid': SNMPTools.get_regexp_oid_match(cls.SONICWALL)
+            }
+        ]
+    
+    def getModel(self) -> Optional[str]:
+        """
+        Retrieve the device model
+        
+        Returns:
+            Model name or None if not available
+        """
+        return self.get(self.SNWL_SYS_MODEL)
+    
+    def getSerial(self) -> Optional[str]:
+        """
+        Retrieve the device serial number
+        
+        Returns:
+            Serial number or None if not available
+        """
+        return self.get(self.SNWL_SYS_SERIAL_NUMBER)
+    
+    def getFirmware(self) -> Optional[str]:
+        """
+        Retrieve the device ROM version
+        
+        Returns:
+            ROM version or None if not available
+        """
+        return self.get(self.SNWL_SYS_ROM_VERSION)
+    
+    def run(self) -> None:
+        """
+        Execute additional inventory tasks
+        
+        Extracts and adds SonicOS firmware information to the device.
+        Handles hex-encoded strings that need conversion.
+        """
+        device = self.device
+        if not device:
+            return
+        
+        # Get firmware version (may be hex-encoded)
+        firmware_version_raw = self.get(self.SNWL_SYS_FIRMWARE_VERSION)
+        if not firmware_version_raw:
+            return
+        
+        # Convert hex to char and sanitize
+        system_version = Tools.get_sanitized_string(
+            Tools.hex2char(firmware_version_raw)
+        )
+        
+        if not system_version:
+            return
+        
+        # Get model name (may also be hex-encoded)
+        model_raw = self.getModel()
+        model_name = None
+        if model_raw:
+            model_name = Tools.get_sanitized_string(
+                Tools.hex2char(model_raw)
+            )
+        
+        # Add SonicOS firmware information to device
+        device.addFirmware({
+            'NAME': model_name,
+            'DESCRIPTION': 'SonicOS firmware',
+            'TYPE': 'system',
+            'VERSION': system_version,
+            'MANUFACTURER': 'SonicWall'
+        })
 
-use constant    sonicwall   => enterprises . '.8741' ;
 
-use constant    snwlSys     => sonicwall . '.2.1.1';
+# Module-level variable for backward compatibility
+mib_support = SonicWallMibSupport.get_mib_support()
 
-use constant    snwlSysModel            => snwlSys . '.1.0';
-use constant    snwlSysSerialNumber     => snwlSys . '.2.0';
-use constant    snwlSysFirmwareVersion  => snwlSys . '.3.0';
-use constant    snwlSysROMVersion       => snwlSys . '.4.0';
 
-our $mibSupport = [
-    {
-        name        => "sonicwall",
-        sysobjectid => getRegexpOidMatch(sonicwall)
-    }
-];
-
-sub getModel {
-    my ($self) = @_;
-
-    return $self->get(snwlSysModel);
-}
-
-sub getSerial {
-    my ($self) = @_;
-
-    return $self->get(snwlSysSerialNumber);
-}
-
-sub getFirmware {
-    my ($self) = @_;
-
-    return $self->get(snwlSysROMVersion);
-}
-
-sub run {
-    my ($self) = @_;
-
-    my $device = $self->device
-        or return;
-
-    my $SystemVersion = getSanitizedString(hex2char($self->get(snwlSysFirmwareVersion)));
-    if ($SystemVersion) {
-        # Add system firmware
-        $device->addFirmware({
-            NAME            => getSanitizedString(hex2char($self->getModel())),
-            DESCRIPTION     => "SonicOS firmware",
-            TYPE            => "system",
-            VERSION         => $SystemVersion,
-            MANUFACTURER    => "SonicWall"
-        });
-    }
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::SonicWall - Inventory module for SonicWall devices
-
-=head1 DESCRIPTION
-
-The module enhances SonicWall devices support.
+# Module metadata
+__all__ = ['SonicWallMibSupport', 'mib_support']
+__version__ = '1.0.0'
+__author__ = 'GLPI Agent'
+__description__ = 'Inventory module for SonicWall devices'
