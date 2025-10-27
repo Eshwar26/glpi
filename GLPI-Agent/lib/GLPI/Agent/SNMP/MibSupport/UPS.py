@@ -1,76 +1,99 @@
-package GLPI::Agent::SNMP::MibSupport::UPS;
+"""
+GLPI Agent SNMP MibSupport for UPS (APC, Riello)
 
-use strict;
-use warnings;
+This module enhances support for UPS devices (e.g., APC, Riello)
+by collecting manufacturer, model, serial number, firmware version,
+and type information via SNMP.
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
+See:
+- PowerNet-MIB
+- UPS-MIB
+"""
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
+from typing import Optional, List, Dict, Any
+from glpi_agent.snmp.mib_support_template import MibSupportTemplate
+from glpi_agent.tools import Tools
+from glpi_agent.tools.snmp import SNMPTools
 
-use constant    apc => '.1.3.6.1.4.1.318' ;
-use constant    riello => '.1.3.6.1.4.1.5491' ;
 
-# See PowerNet-MIB
+class UpsMibSupport(MibSupportTemplate):
+    """
+    Inventory module for UPS devices (APC, Riello)
 
-use constant    upsAdvIdentSerialNumber => apc . '.1.1.1.1.2.3.0';
-use constant    sPDUIdentFirmwareRev    => apc . '.1.1.4.1.2.0';
-use constant    sPDUIdentModelNumber    => apc . '.1.1.4.1.4.0';
-use constant    sPDUIdentSerialNumber   => apc . '.1.1.4.1.5.0';
+    Provides SNMP-based inventory of UPS devices such as model, serial number,
+    firmware version, and manufacturer.
+    """
 
-# See UPS-MIB
+    # Enterprise OIDs
+    APC = '.1.3.6.1.4.1.318'
+    RIELLO = '.1.3.6.1.4.1.5491'
 
-use constant    upsMIB  => '.1.3.6.1.2.1.33' ;
-use constant    upsIdentManufacturer        => upsMIB  .'.1.1.1.0' ;
-use constant    upsIdentModel               => upsMIB  .'.1.1.2.0' ;
-use constant    upsIdentUPSSoftwareVersion  => upsMIB  .'.1.1.3.0' ;
+    # PowerNet-MIB (APC)
+    UPS_ADV_IDENT_SERIAL_NUMBER = f'{APC}.1.1.1.1.2.3.0'
+    SPDU_IDENT_FIRMWARE_REV = f'{APC}.1.1.4.1.2.0'
+    SPDU_IDENT_MODEL_NUMBER = f'{APC}.1.1.4.1.4.0'
+    SPDU_IDENT_SERIAL_NUMBER = f'{APC}.1.1.4.1.5.0'
 
-my $match = apc.'|'.upsMIB.'|'.riello;
+    # UPS-MIB
+    UPS_MIB = '.1.3.6.1.2.1.33'
+    UPS_IDENT_MANUFACTURER = f'{UPS_MIB}.1.1.1.0'
+    UPS_IDENT_MODEL = f'{UPS_MIB}.1.1.2.0'
+    UPS_IDENT_UPS_SOFTWARE_VERSION = f'{UPS_MIB}.1.1.3.0'
 
-our $mibSupport = [
-    {
-        name        => "apc",
-        sysobjectid => qr/^$match/
-    }
-];
+    @classmethod
+    def get_mib_support(cls) -> List[Dict[str, Any]]:
+        """
+        Returns the MIB support configuration for UPS devices
+        """
+        match = f"{cls.APC}|{cls.UPS_MIB}|{cls.RIELLO}"
+        return [
+            {
+                "name": "apc",
+                "sysobjectid": SNMPTools.get_regexp_oid_match(match)
+            }
+        ]
 
-sub getModel {
-    my ($self) = @_;
+    def getModel(self) -> Optional[str]:
+        """
+        Retrieve the UPS model name
+        """
+        model = self.get(self.UPS_IDENT_MODEL) or self.get(self.SPDU_IDENT_MODEL_NUMBER)
+        return Tools.get_canonical_string(model) if model else None
 
-    return $self->get(upsIdentModel) || $self->get(sPDUIdentModelNumber);
-}
+    def getSerial(self) -> Optional[str]:
+        """
+        Retrieve the UPS serial number
+        """
+        serial = self.get(self.UPS_ADV_IDENT_SERIAL_NUMBER) or self.get(self.SPDU_IDENT_SERIAL_NUMBER)
+        return Tools.get_canonical_string(serial) if serial else None
 
-sub getSerial {
-    my ($self) = @_;
+    def getFirmware(self) -> Optional[str]:
+        """
+        Retrieve the UPS firmware version
+        """
+        firmware = self.get(self.UPS_IDENT_UPS_SOFTWARE_VERSION) or self.get(self.SPDU_IDENT_FIRMWARE_REV)
+        return Tools.get_canonical_string(firmware) if firmware else None
 
-    return $self->get(upsAdvIdentSerialNumber) || $self->get(sPDUIdentSerialNumber);
-}
+    def getManufacturer(self) -> Optional[str]:
+        """
+        Retrieve the UPS manufacturer name
+        """
+        manufacturer = self.get(self.UPS_IDENT_MANUFACTURER)
+        return Tools.get_canonical_string(manufacturer) if manufacturer else None
 
-sub getFirmware {
-    my ($self) = @_;
+    def getType(self) -> str:
+        """
+        Returns the device type.
+        TODO: Replace 'NETWORKING' with 'POWER' once supported server-side.
+        """
+        return 'NETWORKING'
 
-    return $self->get(upsIdentUPSSoftwareVersion) || $self->get(sPDUIdentFirmwareRev);
-}
 
-sub getManufacturer {
-    my ($self) = @_;
+# Module-level variable for backward compatibility
+mib_support = UpsMibSupport.get_mib_support()
 
-    return getCanonicalString($self->get(upsIdentManufacturer));
-}
-
-sub getType {
-    # TODO remove when POWER is supported on server-side and replace by 'POWER'
-    return 'NETWORKING';
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::UPS - Inventory module for APC modules
-
-=head1 DESCRIPTION
-
-The module enhances APC devices support.
+# Metadata
+__all__ = ['UpsMibSupport', 'mib_support']
+__version__ = '1.0.0'
+__author__ = 'GLPI Agent'
+__description__ = 'Inventory module for UPS devices (APC, Riello)'
