@@ -1,81 +1,65 @@
-package GLPI::Agent::SNMP::MibSupport::Netgear;
+# netgear_mib.py
+from typing import Optional, Dict, Any, List
 
-use strict;
-use warnings;
+from glpi_agent_snmp_template import MibSupportTemplate
+from glpi_agent_tools import get_canonical_string, glpi_version, walk
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
-
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
-
-use constant netgear    => '.1.3.6.1.4.1.4526';
+# Netgear MIB constants
+NETGEAR = '.1.3.6.1.4.1.4526'
 
 # NETGEAR-INVENTORY-MIB
-use constant fastPathInventory          => netgear . '.10.13';
-use constant AgentInventoryUnitEntry    => fastPathInventory . '.2.2.1';
-
-use constant agentInventoryUnitStatus       => AgentInventoryUnitEntry . '.11';
-use constant agentInventoryUnitSerialNumber => AgentInventoryUnitEntry . '.19';
+FASTPATH_INVENTORY = NETGEAR + '.10.13'
+AGENT_INVENTORY_UNIT_ENTRY = FASTPATH_INVENTORY + '.2.2.1'
+AGENT_INVENTORY_UNIT_STATUS = AGENT_INVENTORY_UNIT_ENTRY + '.11'
+AGENT_INVENTORY_UNIT_SERIAL_NUMBER = AGENT_INVENTORY_UNIT_ENTRY + '.19'
 
 # NG700-INVENTORY-MIB
-use constant fastPathInventory2         => netgear . '.11.13';
-use constant AgentInventoryUnitEntry2   => fastPathInventory2 . '.2.2.1';
-use constant agentInventoryUnitStatus2       => AgentInventoryUnitEntry2 . '.11';
-use constant agentInventoryUnitSerialNumber2 => AgentInventoryUnitEntry2 . '.19';
+FASTPATH_INVENTORY2 = NETGEAR + '.11.13'
+AGENT_INVENTORY_UNIT_ENTRY2 = FASTPATH_INVENTORY2 + '.2.2.1'
+AGENT_INVENTORY_UNIT_STATUS2 = AGENT_INVENTORY_UNIT_ENTRY2 + '.11'
+AGENT_INVENTORY_UNIT_SERIAL_NUMBER2 = AGENT_INVENTORY_UNIT_ENTRY2 + '.19'
 
-our $mibSupport = [
-    {
-        name    => "netgear-ng7000",
-        oid     => fastPathInventory,
-    },
-    {
-        name    => "netgear-ng700",
-        oid     => fastPathInventory2,
-    }
-];
 
-sub run {
-    my ($self) = @_;
+class Netgear(MibSupportTemplate):
+    mib_support = [
+        {"name": "netgear-ng7000", "oid": FASTPATH_INVENTORY},
+        {"name": "netgear-ng700", "oid": FASTPATH_INVENTORY2},
+    ]
 
-    my $device = $self->device
-        or return;
+    def run(self) -> None:
+        device: Optional[Dict[str, Any]] = self.device
+        if not device:
+            return
 
-    return unless ref($device->{COMPONENTS}) eq 'HASH' && ref($device->{COMPONENTS}->{COMPONENT}) eq 'ARRAY';
+        components: Optional[Dict[str, Any]] = device.get("COMPONENTS")
+        if not components or not isinstance(components.get("COMPONENT"), list):
+            return
 
-    # In the case we have more than one chassis component, we have to fix component serials
-    my @chassis = grep { $_->{TYPE} && $_->{TYPE} eq 'chassis' } @{$device->{COMPONENTS}->{COMPONENT}};
-    return unless @chassis > 1;
+        # Identify chassis components
+        chassis: List[Dict[str, Any]] = [
+            comp for comp in components["COMPONENT"]
+            if comp.get("TYPE") == "chassis"
+        ]
+        if len(chassis) <= 1:
+            return
 
-    my $status = $self->walk(agentInventoryUnitStatus) // $self->walk(agentInventoryUnitStatus2);
-    my $serial = $self->walk(agentInventoryUnitSerialNumber) // $self->walk(agentInventoryUnitSerialNumber2);
+        status: Dict[Any, Any] = self.walk(AGENT_INVENTORY_UNIT_STATUS) or self.walk(AGENT_INVENTORY_UNIT_STATUS2) or {}
+        serials: Dict[Any, Any] = self.walk(AGENT_INVENTORY_UNIT_SERIAL_NUMBER) or self.walk(AGENT_INVENTORY_UNIT_SERIAL_NUMBER2) or {}
 
-    foreach my $chassis (@chassis) {
-        next unless $chassis->{NAME} && $chassis->{NAME} =~ /^Unit (\d+)$/;
-        my $unit = $1;
+        for ch in chassis:
+            name = ch.get("NAME")
+            if not name or not name.startswith("Unit "):
+                continue
 
-        # Only check for available chassis
-        next unless $status->{$unit} && $status->{$unit} eq '1';
-        next unless $serial->{$unit};
+            unit = name.split("Unit ")[1]
+            if not status.get(unit) or status[unit] != '1':
+                continue
+            if not serials.get(unit):
+                continue
 
-        $chassis->{SERIAL} = getCanonicalString($serial->{$unit});
+            ch["SERIAL"] = get_canonical_string(serials[unit])
 
-        # From GLPI 10.0.19, we can set discovered stack_number to help GLPI to
-        # know which ports are associated with this stack unit
-        my $glpi_version = $device->{glpi} ? glpiVersion($device->{glpi}) : 0;
-        if (!$glpi_version || $glpi_version >= glpiVersion('10.0.19')) {
-            $chassis->{STACK_NUMBER} = $unit;
-        }
-    }
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::Netgear - Inventory module for Netgear devices
-
-=head1 DESCRIPTION
-
-This module enhances Netgear devices support.
+            # GLPI >= 10.0.19 stack number support
+            glpi_ver = glpi_version(device.get("glpi")) if device.get("glpi") else 0
+            if not glpi_ver or glpi_ver >= glpi_version("10.0.19"):
+                ch["STACK_NUMBER"] = unit
