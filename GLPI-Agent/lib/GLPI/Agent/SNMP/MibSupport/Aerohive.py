@@ -1,87 +1,125 @@
-package GLPI::Agent::SNMP::MibSupport::Aerohive;
+import re
+from typing import Dict, List, Any, Optional
 
-use strict;
-use warnings;
+# Mock utility functions to replace glpi_agent_tools
+def getCanonicalString(value: Optional[str]) -> Optional[str]:
+    """Mock implementation of getCanonicalString: Returns trimmed string or None."""
+    if value is None or not str(value).strip():
+        return None
+    return str(value).strip()
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
-
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
+# Mock utility function to replace glpi_agent_tools_snmp
+def getRegexpOidMatch(oid: str) -> str:
+    """Mock implementation of getRegexpOidMatch: Returns a regex pattern for the OID."""
+    escaped_oid = re.escape(oid)
+    return rf'^{escaped_oid}\..*'
 
 # See AH-SMI-MIB
-use constant aerohive   => '.1.3.6.1.4.1.26928';
-use constant ahProduct  => aerohive . '.1';
+AEROHIVE = '.1.3.6.1.4.1.26928'
+AH_PRODUCT = AEROHIVE + '.1'
 
 # See AH-SYSTEM-MIB
-use constant ahSystem   => ahProduct . '.2';
-use constant ahSystemName       => ahSystem . '.1.0';
-use constant ahSystemSerial     => ahSystem . '.5.0';
-use constant ahDeviceMode       => ahSystem . '.6.0';
-use constant ahHwVersion        => ahSystem . '.8.0';
-use constant ahFirmwareVersion  => ahSystem . '.12.0';
+AH_SYSTEM = AH_PRODUCT + '.2'
+AH_SYSTEM_NAME = AH_SYSTEM + '.1.0'
+AH_SYSTEM_SERIAL = AH_SYSTEM + '.5.0'
+AH_DEVICE_MODE = AH_SYSTEM + '.6.0'
+AH_HW_VERSION = AH_SYSTEM + '.8.0'
+AH_FIRMWARE_VERSION = AH_SYSTEM + '.12.0'
 
-our $mibSupport = [
+MIB_SUPPORT = [
     {
-        name    => "aerohive",
-        sysobjectid => getRegexpOidMatch(aerohive)
+        'name': "aerohive",
+        'sysobjectid': getRegexpOidMatch(AEROHIVE)
     }
-];
+]
 
-sub getType {
-    return 'NETWORKING';
-}
+# Mock device class to simulate device interactions
+class Device:
+    def __init__(self):
+        self.firmwares = []
 
-sub getManufacturer {
-    my ($self) = @_;
+    def add_firmware(self, firmware: Dict[str, str]):
+        self.firmwares.append(firmware)
+        print(f"Added firmware: {firmware}")
 
-    return 'Aerohive Networks';
-}
+# Mock base class to simulate GLPIAgentSNMPMibSupportTemplate
+class GLPIAgentSNMPMibSupportTemplate:
+    def __init__(self, device: Optional[Device] = None):
+        self.device = device
+        self._snmp_data = {}  # Simulated SNMP data store
 
-sub getSerial {
-    my ($self) = @_;
+    def get(self, oid: str) -> Optional[str]:
+        """Mock SNMP get operation."""
+        # Simulate SNMP data for testing
+        mock_data = {
+            AH_SYSTEM_SERIAL: "AH123456789",
+            AH_FIRMWARE_VERSION: "HiveOS 8.4r2",
+            AH_DEVICE_MODE: "AP350",
+            AH_HW_VERSION: "HW v1.2.3",
+            AH_SYSTEM_NAME: "Aerohive-AP1"
+        }
+        return mock_data.get(oid)
 
-    return getCanonicalString($self->get(ahSystemSerial));
-}
+class GLPIAgentSNMPMibSupportAerohive(GLPIAgentSNMPMibSupportTemplate):
+    """
+    Inventory module for Aerohive Networks
 
-sub getFirmware {
-    my ($self) = @_;
+    This module enhances Aerohive Networks devices support.
+    """
 
-    return getCanonicalString($self->get(ahFirmwareVersion));
-}
+    @classmethod
+    def get_type(cls):
+        return 'NETWORKING'
 
-sub getModel {
-    my ($self) = @_;
+    @classmethod
+    def get_manufacturer(cls, self):
+        return 'Aerohive Networks'
 
-    return getCanonicalString($self->get(ahDeviceMode));
-}
+    @classmethod
+    def get_serial(cls, self):
+        return getCanonicalString(self.get(AH_SYSTEM_SERIAL))
 
-sub run {
-    my ($self) = @_;
+    @classmethod
+    def get_firmware(cls, self):
+        return getCanonicalString(self.get(AH_FIRMWARE_VERSION))
 
-    my $device = $self->device
-        or return;
+    @classmethod
+    def get_model(cls, self):
+        return getCanonicalString(self.get(AH_DEVICE_MODE))
 
-    my $ahHwVersion = getCanonicalString($self->get(ahHwVersion));
-    if ($ahHwVersion) {
-        my $firmware = {
-            NAME            => "Aerohive hardware",
-            DESCRIPTION     => "Aerohive platform hardware version",
-            TYPE            => "hardware",
-            VERSION         => $ahHwVersion,
-            MANUFACTURER    => "Aerohive Networks"
-        };
-        $device->addFirmware($firmware);
-    }
-}
+    def run(self):
+        device = self.device
+        if not device:
+            return
 
-1;
+        ah_hw_version = getCanonicalString(self.get(AH_HW_VERSION))
+        if ah_hw_version:
+            firmware = {
+                'NAME': "Aerohive hardware",
+                'DESCRIPTION': "Aerohive platform hardware version",
+                'TYPE': "hardware",
+                'VERSION': ah_hw_version,
+                'MANUFACTURER': "Aerohive Networks"
+            }
+            device.add_firmware(firmware)
 
-__END__
-
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::Aerohive - Inventory module for Aerohive Networks
-
-=head1 DESCRIPTION
-
-This module enhances Aerohive Networks devices support.
+# Example usage to demonstrate functionality
+if __name__ == "__main__":
+    # Create a mock device
+    device = Device()
+    
+    # Instantiate the Aerohive SNMP support class
+    aerohive = GLPIAgentSNMPMibSupportAerohive(device=device)
+    
+    # Test the methods
+    print(f"Type: {aerohive.get_type()}")
+    print(f"Manufacturer: {aerohive.get_manufacturer(aerohive)}")
+    print(f"Serial: {aerohive.get_serial(aerohive)}")
+    print(f"Firmware: {aerohive.get_firmware(aerohive)}")
+    print(f"Model: {aerohive.get_model(aerohive)}")
+    
+    # Run the inventory process
+    aerohive.run()
+    
+    # Display the device's firmware list
+    print(f"Device firmwares: {device.firmwares}")
