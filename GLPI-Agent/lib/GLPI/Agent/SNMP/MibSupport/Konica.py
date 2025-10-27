@@ -1,4 +1,124 @@
-package GLPI::Agent::SNMP::MibSupport::Konica;
+# konica_mib_support.py
+# Converted from Perl (GLPI::Agent::SNMP::MibSupport::Konica)
+
+from glpi_agent.tools import (
+    get_canonical_string,
+    get_canonical_mac_address,
+    get_regexp_oid_match,
+    hex2char,
+)
+class SNMPBase:
+    def __init__(self, device=None):
+        self.device = device
+
+    def get(self, oid):
+        """Method to get SNMP value for an OID"""
+        # Implement SNMP GET logic here
+        return None
+
+    def walk(self, oid):
+        """Method to walk SNMP OID tree"""
+        # Implement SNMP WALK logic here
+        return {}
+
+ENTERPRISES = ".1.3.6.1.4.1"
+KONICA = f"{ENTERPRISES}.18334"
+
+# Konica MIB constants
+KONICA_SYSOBJECT_ID = f"{KONICA}.1.1.1.2"
+KONICA_MODEL = f"{KONICA}.1.1.1.1.6.2.1.0"
+KONICA_PRINTER_COUNTERS = f"{KONICA}.1.1.1.5.7.2"
+
+KONICA_TOTAL = f"{KONICA_PRINTER_COUNTERS}.1.1.0"
+KONICA_RECTO_VERSO = f"{KONICA_PRINTER_COUNTERS}.1.3.0"
+KONICA_BLACK_COPY = f"{KONICA_PRINTER_COUNTERS}.2.1.5.1.1"
+KONICA_BLACK_PRINT = f"{KONICA_PRINTER_COUNTERS}.2.1.5.1.2"
+KONICA_COLOR_COPY = f"{KONICA_PRINTER_COUNTERS}.2.1.5.2.1"
+KONICA_COLOR_PRINT = f"{KONICA_PRINTER_COUNTERS}.2.1.5.2.2"
+KONICA_SCANS = f"{KONICA_PRINTER_COUNTERS}.3.1.5.1"
+
+KONICA_FIRMWARE = f"{KONICA}.1.1.1.5.5.1.1"
+KONICA_FIRMWARE_NAME = f"{KONICA_FIRMWARE}.2"
+KONICA_FIRMWARE_VERSION = f"{KONICA_FIRMWARE}.3"
+
+MIB_SUPPORT = [
+    {
+        "name": "konica-printer",
+        "sysobjectid": get_regexp_oid_match(KONICA_SYSOBJECT_ID),
+    }
+]
+
+
+class KonicaMibSupport(SNMPBase):
+    """
+    Python equivalent of GLPI::Agent::SNMP::MibSupport::Konica
+    Provides SNMP-based printer inventory enhancement for Konica devices.
+    """
+
+    def get_model(self):
+        """Extract printer model name and remove 'KONICA MINOLTA' prefix."""
+        raw_model = self.get(KONICA_MODEL)
+        if not raw_model:
+            return None
+        model = get_canonical_string(hex2char(raw_model))
+        if not model:
+            return None
+        return model.replace("KONICA MINOLTA ", "", 1).strip()
+
+    def run(self):
+        """Collect and process device data such as page counters and firmware."""
+        device = self.device
+        if not device:
+            return
+
+        # Map SNMP counters to GLPI attributes
+        mapping = {
+            "PRINTCOLOR": KONICA_COLOR_PRINT,
+            "PRINTBLACK": KONICA_BLACK_PRINT,
+            "RECTOVERSO": KONICA_RECTO_VERSO,
+            "COPYCOLOR": KONICA_COLOR_COPY,
+            "COPYBLACK": KONICA_BLACK_COPY,
+            "SCANNED": KONICA_SCANS,
+            "TOTAL": KONICA_TOTAL,
+        }
+
+        for counter, oid in mapping.items():
+            count = self.get(oid)
+            if count is not None:
+                device.setdefault("PAGECOUNTERS", {})[counter] = count
+
+        pc = device.get("PAGECOUNTERS", {})
+
+        # Derived totals
+        if pc.get("PRINTCOLOR") or pc.get("PRINTBLACK"):
+            pc["PRINTTOTAL"] = (pc.get("PRINTBLACK", 0) + pc.get("PRINTCOLOR", 0))
+
+        if pc.get("COPYCOLOR") or pc.get("COPYBLACK"):
+            pc["COPYTOTAL"] = (pc.get("COPYBLACK", 0) + pc.get("COPYCOLOR", 0))
+
+        # Firmware information
+        firmware_name = self.walk(KONICA_FIRMWARE_NAME)
+        firmware_version = self.walk(KONICA_FIRMWARE_VERSION)
+
+        if firmware_name and firmware_version:
+            for key, name_val in firmware_name.items():
+                name = get_canonical_string(hex2char(name_val))
+                if not name:
+                    continue
+
+                version = get_canonical_string(hex2char(firmware_version.get(key, "")))
+                if not version or version in ("-", "Registered"):
+                    continue
+
+                name = name.replace(" version", "", 1).strip()
+                firmware = {
+                    "NAME": f"Konica {name}",
+                    "DESCRIPTION": f"Printer {name}",
+                    "TYPE": "printer",
+                    "VERSION": version,
+                    "MANUFACTURER": "Konica",
+                }
+                device.add_firmware(firmware)package GLPI::Agent::SNMP::MibSupport::Konica;
 
 use strict;
 use warnings;
