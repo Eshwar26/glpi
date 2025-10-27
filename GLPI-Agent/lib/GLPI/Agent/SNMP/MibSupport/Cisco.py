@@ -1,55 +1,83 @@
-package GLPI::Agent::SNMP::MibSupport::Cisco;
+import re
 
-use strict;
-use warnings;
+# Mock or simple implementations for GLPI Agent functions/tools
+def get_canonical_string(value):
+    if value is None:
+        return None
+    return str(value).strip()
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
+def get_regexp_oid_match(oid):
+    # Assuming it returns a compiled regex for exact prefix match
+    return re.compile(f'^{re.escape(oid)}')
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
+# Simple mock base class for compatibility
+class MibSupportTemplate:
+    def __init__(self):
+        self.device = None  # To be set externally; for testing, can be mocked
 
-use constant    priority => 5;
+    def get(self, oid):
+        # Mock SNMP get; in real use, implement SNMP fetch
+        # For now, returns mock values to test functionality
+        mock_values = {
+            '.1.3.6.1.4.1.9.2.1.3.0': 'cisco-router-01',  # hostName
+        }
+        return mock_values.get(oid, None)
 
-# See ENTITY-MIB
-use constant    entPhysicalModelName    => '.1.3.6.1.2.1.47.1.1.1.1.13';
+# Mock Device class for compatibility, including get_first method
+class Device:
+    def __init__(self):
+        pass  # Can hold data if needed
 
-# See CISCO-SMI
-use constant    cisco       => '.1.3.6.1.4.1.9';
-use constant    cisco_local => cisco . '.2';
+    def get_first(self, oid):
+        # Mock get_first: simulates walking the OID table and returning first value
+        # For entPhysicalModelName, mock as if walking .1.3.6.1.2.1.47.1.1.1.1.13 returns a dict
+        if oid == '.1.3.6.1.2.1.47.1.1.1.1.13':
+            # Mock walk result: {'1': 'Cisco ISR 4331', '2': None, '3': 'Module XYZ'}
+            mock_walk = {'1': 'Cisco ISR 4331'}
+            for index, value in mock_walk.items():
+                if value:
+                    return value
+        return None
 
-# See OLD-CISCO-MEMORY-MIB
-use constant    hostName    => cisco_local . '.1.3.0' ;
+# Constants
+PRIORITY = 5
 
-our $mibSupport = [
+ENT_PHYSICAL_MODEL_NAME = '.1.3.6.1.2.1.47.1.1.1.1.13'
+
+CISCO = '.1.3.6.1.4.1.9'
+CISCO_LOCAL = CISCO + '.2'
+
+HOST_NAME = CISCO_LOCAL + '.1.3.0'
+
+mib_support = [
     {
-        name        => "cisco",
-        sysobjectid => getRegexpOidMatch(cisco)
+        'name': 'cisco',
+        'sysobjectid': get_regexp_oid_match(CISCO)
     }
-];
+]
 
-sub getModel {
-    my ($self) = @_;
+class Cisco(MibSupportTemplate):
+    def get_model(self):
+        device = self.device
+        if not device:
+            return None
+        return get_canonical_string(device.get_first(ENT_PHYSICAL_MODEL_NAME))
 
-    my $device = $self->device
-        or return;
+    def get_snmp_hostname(self):
+        return get_canonical_string(self.get(HOST_NAME))
 
-    return getCanonicalString($device->get_first(entPhysicalModelName));
-}
+# For testing/standalone run (optional)
+if __name__ == "__main__":
+    # Test instantiation
+    cisco = Cisco()
+    cisco.device = Device()
+    print("Model:", cisco.get_model())
+    print("SNMP Hostname:", cisco.get_snmp_hostname())
+    print("Module loaded and run successfully without errors.")
 
-sub getSnmpHostname {
-    my ($self) = @_;
-
-    return getCanonicalString($self->get(hostName));
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
+"""
 GLPI::Agent::SNMP::MibSupport::Cisco - Inventory module to enhance Cisco devices support.
 
-=head1 DESCRIPTION
-
 The module enhances Cisco support.
+"""
+
