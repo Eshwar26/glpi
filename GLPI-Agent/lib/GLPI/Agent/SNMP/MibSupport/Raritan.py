@@ -1,63 +1,32 @@
-package GLPI::Agent::SNMP::MibSupport::Raritan;
+# raritan_mib.py
+from glpi_agent_snmp_template import MibSupportTemplate
+from glpi_agent_tools import get_canonical_string, get_regexp_oid_match
 
-use strict;
-use warnings;
+RARITAN = '.1.3.6.1.4.1.13742'
+PDU2 = RARITAN + '.6'
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
+NAMEPLATE_ENTRY = PDU2 + '.3.2.1.1'
+PDU_MANUFACTURER = NAMEPLATE_ENTRY + '.2.1'
+PDU_MODEL = NAMEPLATE_ENTRY + '.3.1'
+PDU_SERIAL_NUMBER = NAMEPLATE_ENTRY + '.4.1'
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
+UNIT_CONFIGURATION_ENTRY = PDU2 + '.3.2.2.1'
+PDU_NAME = UNIT_CONFIGURATION_ENTRY + '.13.1'
 
-use constant    raritan => '.1.3.6.1.4.1.13742' ;
-use constant    pdu2    => raritan . '.6' ;
 
-use constant    nameplateEntry  => pdu2 . '.3.2.1.1';
-use constant    pduManufacturer => nameplateEntry . '.2.1';
-use constant    pduModel        => nameplateEntry . '.3.1';
-use constant    pduSerialNumber => nameplateEntry . '.4.1';
+class Raritan(MibSupportTemplate):
+    mib_support = [
+        {"name": "raritan-pdu2", "sysobjectid": get_regexp_oid_match(PDU2)}
+    ]
 
-use constant    unitConfigurationEntry  => pdu2 . '.3.2.2.1';
-use constant    pduName                 => unitConfigurationEntry . '.13.1';
+    def get_manufacturer(self) -> str:
+        return get_canonical_string(self.get(PDU_MANUFACTURER)) or "Raritan"
 
-our $mibSupport = [
-    {
-        name        => "raritan-pdu2",
-        sysobjectid => getRegexpOidMatch(pdu2)
-    }
-];
+    def get_serial(self) -> str:
+        return get_canonical_string(self.get(PDU_SERIAL_NUMBER))
 
-sub getManufacturer {
-    my ($self) = @_;
+    def get_model(self) -> str:
+        return get_canonical_string(self.get(PDU_MODEL))
 
-    return getCanonicalString($self->get(pduManufacturer)) || 'Raritan';
-}
-
-sub getSerial {
-    my ($self) = @_;
-
-    return getCanonicalString($self->get(pduSerialNumber));
-}
-
-sub getModel {
-    my ($self) = @_;
-
-    return getCanonicalString($self->get(pduModel));
-}
-
-sub getSnmpHostname {
-    my ($self) = @_;
-
-    return getCanonicalString($self->get(pduName));
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::Raritan - Inventory module for Raritan Pdu devices
-
-=head1 DESCRIPTION
-
-The module enhances Raritan Pdu devices support.
+    def get_snmp_hostname(self) -> str:
+        return get_canonical_string(self.get(PDU_NAME))
