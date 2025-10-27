@@ -1,210 +1,148 @@
-package GLPI::Agent::SNMP::MibSupport::Pantum;
+# pantum_mib.py
+from typing import Optional
 
-use strict;
-use warnings;
+from glpi_agent_snmp_template import MibSupportTemplate
+from glpi_agent_tools import get_canonical_string, get_regexp_oid_match, is_integer
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
-
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
-
-use constant    mib2        => '.1.3.6.1.2.1' ;
-use constant    enterprises => '.1.3.6.1.4.1' ;
+# MIB constants
+MIB2 = '.1.3.6.1.2.1'
+ENTERPRISES = '.1.3.6.1.4.1'
 
 # Pantum private
-use constant    pantum  => enterprises . '.40093';
-
-use constant    pantumPrinter   => pantum . '.1.1' ;
-use constant    pantumFWVersion     => pantumPrinter . '.1.1' ;
-use constant    pantumRAM           => pantumPrinter . '.1.2' ;
-use constant    pantumSerialNumber1 => pantumPrinter . '.1.5' ;
-use constant    pantumSerialNumber2 => pantum . '.6.1.2' ;
-use constant    pantumSerialNumber3 => pantum . '.10.1.1.4' ;
-use constant    pantumCounters      => pantumPrinter . '.3' ;
+PANTUM = ENTERPRISES + '.40093'
+PANTUM_PRINTER = PANTUM + '.1.1'
+PANTUM_FW_VERSION = PANTUM_PRINTER + '.1.1'
+PANTUM_RAM = PANTUM_PRINTER + '.1.2'
+PANTUM_SERIAL_NUMBER1 = PANTUM_PRINTER + '.1.5'
+PANTUM_SERIAL_NUMBER2 = PANTUM + '.6.1.2'
+PANTUM_SERIAL_NUMBER3 = PANTUM + '.10.1.1.4'
+PANTUM_COUNTERS = PANTUM_PRINTER + '.3'
 
 # Printer-MIB
-use constant    printmib                => mib2 . '.43' ;
-use constant    prtGeneralPrinterName   => printmib . '.5.1.1.16.1' ;
-use constant    prtMarkerSuppliesEntry  => printmib . '.11.1.1' ;
-use constant    prtMarkerColorantEntry  => printmib . '.12.1.1' ;
+PRINTMIB = MIB2 + '.43'
+PRT_GENERAL_PRINTER_NAME = PRINTMIB + '.5.1.1.16.1'
+PRT_MARKER_SUPPLIES_ENTRY = PRINTMIB + '.11.1.1'
+PRT_MARKER_COLORANT_ENTRY = PRINTMIB + '.12.1.1'
 
-our $mibSupport = [
-    {
-        name        => "pantum-printer",
-        sysobjectid => getRegexpOidMatch(pantumPrinter)
-    }
-];
 
-sub getModel {
-    my ($self) = @_;
+class Pantum(MibSupportTemplate):
+    mib_support = [
+        {"name": "pantum-printer", "sysobjectid": get_regexp_oid_match(PANTUM_PRINTER)}
+    ]
 
-    return $self->get(prtGeneralPrinterName);
-}
+    def get_model(self) -> Optional[str]:
+        return self.get(PRT_GENERAL_PRINTER_NAME)
 
-sub getManufacturer {
-    return 'Pantum';
-}
+    @staticmethod
+    def get_manufacturer() -> str:
+        return "Pantum"
 
-sub getSerial {
-    my ($self) = @_;
+    def get_serial(self) -> Optional[str]:
+        return self.get(PANTUM_SERIAL_NUMBER1) \
+               or self.get(PANTUM_SERIAL_NUMBER2) \
+               or self.get(PANTUM_SERIAL_NUMBER3)
 
-    return $self->get(pantumSerialNumber1) || $self->get(pantumSerialNumber2) ||
-        $self->get(pantumSerialNumber3);
-}
+    def run(self):
+        device = self.device
+        if not device:
+            return
 
-sub run {
-    my ($self) = @_;
-
-    my $device = $self->device
-        or return;
-
-    # Consumable level: most manufacturers reports trees under .1.3.6.1.2.1.43.11.1.1.x.1 oids
-    # where Pantum manufacturer decided to use directly each oids when they are using only one consumable
-
-    # Same as in GLPI::Agent::Tools::Hardware
-    my %consumable_types = (
-         3 => 'TONER',
-         4 => 'WASTETONER',
-         5 => 'CARTRIDGE',
-         6 => 'CARTRIDGE',
-         8 => 'WASTETONER',
-         9 => 'DRUM',
-        10 => 'DEVELOPER',
-        12 => 'CARTRIDGE',
-        15 => 'FUSERKIT',
-        18 => 'MAINTENANCEKIT',
-        20 => 'TRANSFERKIT',
-        21 => 'TONER',
-        32 => 'STAPLES',
-    );
-
-    my $max     = $self->get(prtMarkerSuppliesEntry . '.8.1');
-    my $current = $self->get(prtMarkerSuppliesEntry . '.9.1');
-    if (defined($max) && defined($current)) {
-        # Consumable identification
-        my $type_id  = $self->get(prtMarkerSuppliesEntry . '.5.1');
-        my $description = getCanonicalString($self->get(prtMarkerSuppliesEntry . '.6.1') // '');
-
-        my $type;
-        if ($type_id && $type_id != 1) {
-            $type = $consumable_types{$type_id};
-        } else {
-            # fallback on description
-            $type =
-                $description =~ /maintenance/i ? 'MAINTENANCEKIT' :
-                $description =~ /fuser/i       ? 'FUSERKIT'       :
-                $description =~ /transfer/i    ? 'TRANSFERKIT'    :
-                                                 undef            ;
+        # Consumable types mapping
+        consumable_types = {
+            3: 'TONER', 4: 'WASTETONER', 5: 'CARTRIDGE', 6: 'CARTRIDGE', 8: 'WASTETONER',
+            9: 'DRUM', 10: 'DEVELOPER', 12: 'CARTRIDGE', 15: 'FUSERKIT', 18: 'MAINTENANCEKIT',
+            20: 'TRANSFERKIT', 21: 'TONER', 32: 'STAPLES'
         }
 
-        if (!$type) {
-            $device->{logger}->debug("unknown consumable type $type_id: " . ($description || "no description"))
-                if $device->{logger};
-        } elsif ($type eq 'TONER' || $type eq 'DRUM' || $type eq 'CARTRIDGE' || $type eq 'DEVELOPER') {
-            my $color = getCanonicalString($self->get(prtMarkerColorantEntry . '.4.1'));
-            if (!$color) {
-                $device->{logger}->debug("setting black color as default for: " . ($description || "no description"))
-                    if $device->{logger};
-                # fallback on description or black
-                $color =
-                    $description =~ /cyan/i           ? 'cyan'    :
-                    $description =~ /magenta/i        ? 'magenta' :
-                    $description =~ /(yellow|jaune)/i ? 'yellow'  :
-                    $description =~ /(black|noir)/i   ? 'black'   : 'black'   ;
+        max_val = self.get(PRT_MARKER_SUPPLIES_ENTRY + '.8.1')
+        current_val = self.get(PRT_MARKER_SUPPLIES_ENTRY + '.9.1')
+
+        if max_val is not None and current_val is not None:
+            type_id = self.get(PRT_MARKER_SUPPLIES_ENTRY + '.5.1')
+            description = get_canonical_string(self.get(PRT_MARKER_SUPPLIES_ENTRY + '.6.1') or '')
+
+            type_name = consumable_types.get(type_id) if type_id and type_id != 1 else None
+
+            if not type_name:
+                desc_lower = description.lower()
+                if 'maintenance' in desc_lower:
+                    type_name = 'MAINTENANCEKIT'
+                elif 'fuser' in desc_lower:
+                    type_name = 'FUSERKIT'
+                elif 'transfer' in desc_lower:
+                    type_name = 'TRANSFERKIT'
+
+            if type_name in ['TONER', 'DRUM', 'CARTRIDGE', 'DEVELOPER']:
+                color = get_canonical_string(self.get(PRT_MARKER_COLORANT_ENTRY + '.4.1'))
+                if not color:
+                    desc_lower = description.lower()
+                    if 'cyan' in desc_lower:
+                        color = 'cyan'
+                    elif 'magenta' in desc_lower:
+                        color = 'magenta'
+                    elif 'yellow' in desc_lower or 'jaune' in desc_lower:
+                        color = 'yellow'
+                    else:
+                        color = 'black'
+                type_name += color.upper()
+
+            # Compute consumable value
+            if current_val == -2:
+                value = 'WARNING'
+            elif current_val == -3:
+                value = 'OK'
+            elif is_integer(max_val) and max_val >= 0:
+                value = int((100 * current_val) / max_val) if is_integer(current_val) and max_val > 0 else None
+            else:
+                unit_id = self.get(PRT_MARKER_SUPPLIES_ENTRY + '.7.1')
+                if unit_id == 19:
+                    value = current_val
+                elif unit_id == 18:
+                    value = f"{current_val} items"
+                elif unit_id == 17:
+                    value = f"{current_val} m"
+                elif unit_id == 16:
+                    value = f"{current_val} feet"
+                elif unit_id == 15:
+                    value = f"{current_val / 10} ml"
+                elif unit_id == 13:
+                    value = f"{current_val / 10} g"
+                elif unit_id == 11:
+                    value = f"{current_val} hours"
+                elif unit_id == 8:
+                    value = f"{current_val} sheets"
+                elif unit_id == 7:
+                    value = f"{current_val} impressions"
+                elif unit_id == 4:
+                    value = f"{current_val / 1000} mm"
+                else:
+                    value = current_val
+
+            if type_name and value is not None:
+                device.CARTRIDGES[type_name] = value
+
+        ram_val = self.get(PANTUM_RAM)
+        if ram_val is not None and is_integer(ram_val):
+            device.INFO['RAM'] = ram_val
+
+        counters = self.walk(PANTUM_COUNTERS) or {}
+        if counters:
+            total = 0
+            mapping = {1: 'DUPLEX', 9: 'COPYTOTAL', 12: 'PRINTTOTAL'}
+            for key, name in mapping.items():
+                count = counters.get(key)
+                if count is not None and is_integer(count):
+                    device.PAGECOUNTERS[name] = count
+                    total += count
+            device.PAGECOUNTERS['TOTAL'] = total
+
+        version = get_canonical_string(self.get(PANTUM_FW_VERSION))
+        if version:
+            firmware = {
+                "NAME": f"Pantum {device.MODEL} firmware",
+                "DESCRIPTION": f"Pantum {device.MODEL} firmware version",
+                "TYPE": "printer",
+                "VERSION": version,
+                "MANUFACTURER": "Pantum"
             }
-            $type .= uc($color);
-        }
-
-        my $value;
-        if ($current == -2) {
-            # A value of -2 means "unknown" according to the RFC - but this
-            # is not NULL - it means "something undetermined between
-            # OK and BAD".
-            # Several makers seem to have grabbed it as a way of indicating
-            # "almost out" for supplies and waste. (Like a vehicle low fuel warning)
-            #
-            # This was previously set to undef - but that was triggering a bug
-            # that caused bad XML to be output and that in turn would block FI4G imports
-            # which in turn would make page counters look strange for the days
-            # when it was happening (zero pages, then a big spike)
-            #
-            # Using "WARNING" should allow print monitoring staff to ensure
-            # replacement items are in stock before they go "BAD"
-            $value = 'WARNING';
-        } elsif ($current == -3) {
-            # A value of -3 means that the printer knows that there is some
-            # supply/remaining space, respectively.
-            $value = 'OK';
-        } else {
-            if (isInteger($max) && $max >= 0) {
-                if (isInteger($current) && $max > 0) {
-                    $value = int(( 100 * $current ) / $max);
-                }
-            } else {
-                # PrtMarkerSuppliesSupplyUnitTC in Printer MIB
-                my $unit_id = $self->get(prtMarkerSuppliesEntry . '.7.1');
-                $value =
-                    $unit_id == 19 ?  $current                         :
-                    $unit_id == 18 ?  $current         . 'items'       :
-                    $unit_id == 17 ?  $current         . 'm'           :
-                    $unit_id == 16 ?  $current         . 'feet'        :
-                    $unit_id == 15 ? ($current / 10)   . 'ml'          :
-                    $unit_id == 13 ? ($current / 10)   . 'g'           :
-                    $unit_id == 11 ?  $current         . 'hours'       :
-                    $unit_id ==  8 ?  $current         . 'sheets'      :
-                    $unit_id ==  7 ?  $current         . 'impressions' :
-                    $unit_id ==  4 ? ($current / 1000) . 'mm'          :
-                                      $current         . '?'           ;
-            }
-        }
-
-        $device->{CARTRIDGES}->{$type} = $value
-            if $type && defined($value);
-    }
-
-    my $ram = $self->get(pantumRAM);
-    $device->{INFO}->{RAM} = $ram
-        if defined($ram) && isInteger($ram);
-
-    my $counters = $self->walk(pantumCounters);
-    if ($counters) {
-        my $total = 0;
-        my %mapping = (
-            1   => 'DUPLEX',
-            9   => 'COPYTOTAL',
-            12  => 'PRINTTOTAL',
-        );
-
-        foreach my $key (sort keys(%mapping)) {
-            my $count = $counters->{$key};
-            next unless defined($count) && isInteger($count);
-            $device->{PAGECOUNTERS}->{$mapping{$key}} = $count;
-            $total += $count;
-        }
-        $device->{PAGECOUNTERS}->{TOTAL} = $total;
-    }
-
-    my $version = getCanonicalString($self->get(pantumFWVersion));
-    if ($version) {
-        my $firmware = {
-            NAME            => "Pantum $device->{MODEL} firmware",
-            DESCRIPTION     => "Pantum $device->{MODEL} firmware version",
-            TYPE            => "printer",
-            VERSION         => $version,
-            MANUFACTURER    => "Pantum"
-        };
-        $device->addFirmware($firmware);
-    }
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::Pantum - Inventory module for Pantum Printers
-
-=head1 DESCRIPTION
-
-The module enhances Pantum printers devices support.
+            device.add_firmware(firmware)
