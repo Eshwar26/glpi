@@ -1,37 +1,51 @@
-package GLPI::Agent::SNMP::MibSupport::Idrac;
+import re
 
-use strict;
-use warnings;
+# Mock or simple implementations for GLPI Agent functions/tools
+def get_regexp_oid_match(oid):
+    # Returns a compiled regex for exact prefix match
+    return re.compile(f'^{re.escape(oid)}')
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
+# Simple mock base class for compatibility
+class MibSupportTemplate:
+    def __init__(self):
+        self.device = None  # To be set externally; for testing, can be mocked
+    
+    def get(self, oid):
+        # Mock SNMP get; in real use, implement SNMP fetch
+        # For now, returns mock values to test functionality
+        mock_values = {
+            '.1.3.6.1.4.1.674.10892.2.1.1.11.0': 'ABCD1234',  # serial
+        }
+        return mock_values.get(oid, None)
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
+# Constants
+IDRAC = '.1.3.6.1.4.1.674.10892'
+SERIAL = IDRAC + '.2.1.1.11.0'
 
-use constant idrac  => '.1.3.6.1.4.1.674.10892';
-use constant serial => idrac . '.2.1.1.11.0';
-
-our $mibSupport = [
+mib_support = [
     {
-        name        => "idrac",
-        sysobjectid => getRegexpOidMatch(idrac)
+        'name': 'idrac',
+        'sysobjectid': get_regexp_oid_match(IDRAC)
     }
-];
+]
 
-sub getSerial {
-    my ($self) = @_;
+class Idrac(MibSupportTemplate):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    
+    def get_serial(self):
+        return self.get(SERIAL)
 
-    return $self->get(serial);
-}
+# For testing/standalone run
+if __name__ == "__main__":
+    # Test instantiation
+    idrac = Idrac()
+    print("Serial:", idrac.get_serial())
+    
+    print("\nModule loaded and run successfully without errors.")
 
-1;
-
-__END__
-
-=head1 NAME
-
+"""
 GLPI::Agent::SNMP::MibSupport::Idrac - Inventory module for Idrac
 
-=head1 DESCRIPTION
-
 This module enhances Idrac support.
+"""
