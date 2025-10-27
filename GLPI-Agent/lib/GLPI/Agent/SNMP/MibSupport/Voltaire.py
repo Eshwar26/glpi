@@ -1,66 +1,59 @@
-package GLPI::Agent::SNMP::MibSupport::Voltaire;
+# GLPI/Agent/SNMP/MibSupport/Voltaire.py
 
-use strict;
-use warnings;
+from GLPI.Agent.SNMP.MibSupportTemplate import MibSupportTemplate
+from GLPI.Agent.Tools import getCanonicalString
+from GLPI.Agent.Tools.SNMP import getRegexpOidMatch
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
+# SNMP OIDs
+sysName = '.1.3.6.1.2.1.1.5.0'
+enterprises = '.1.3.6.1.4.1'
+voltaire = enterprises + '.5206'
+serialnumber = voltaire + '.3.29.1.3.1007.1'
+version = voltaire + '.3.1.0'
 
-use constant    sysName     => '.1.3.6.1.2.1.1.5.0' ;
-use constant    enterprises => '.1.3.6.1.4.1' ;
 
-use constant    voltaire        => enterprises . '.5206' ;
-use constant    serialnumber    => voltaire . '.3.29.1.3.1007.1';
-use constant    version         => voltaire . '.3.1.0';
-
-our $mibSupport = [
+# MIB Support registration
+mibSupport = [
     {
-        name        => "voltaire",
-        sysobjectid => getRegexpOidMatch(voltaire)
+        "name": "voltaire",
+        "sysobjectid": getRegexpOidMatch(voltaire)
     }
-];
+]
 
-sub getType {
-    return 'NETWORKING';
-}
 
-sub getManufacturer {
-    return 'Voltaire';
-}
+class Voltaire(MibSupportTemplate):
+    """Inventory module for Voltaire devices."""
 
-sub getModel {
-    my ($self) = @_;
+    def getType(self):
+        return "NETWORKING"
 
-    my $sysName = $self->get(sysName)
-        or return;
+    def getManufacturer(self):
+        return "Voltaire"
 
-    my ($model) = $sysName =~ /^([^-]+)/;
+    def getModel(self):
+        sys_name = self.get(sysName)
+        if not sys_name:
+            return None
 
-    return $model;
-}
+        # Extract model (text before '-')
+        parts = sys_name.split('-', 1)
+        model = parts[0] if parts else None
+        return model
 
-sub getSerial {
-    my ($self) = @_;
+    def getSerial(self):
+        return self.get(serialnumber)
 
-    return $self->get(serialnumber);
-}
+    def getFirmware(self):
+        return self.get(version)
 
-sub getFirmware {
-    my ($self) = @_;
 
-    return $self->get(version);
-}
+# Documentation equivalent to POD
+"""
+NAME
+    GLPI.Agent.SNMP.MibSupport.Voltaire - Inventory module for Voltaire devices
 
-1;
-
-__END__
-
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::Voltaire - Inventory module for Voltaire devices
-
-=head1 DESCRIPTION
-
-The module enhances Voltaire devices support.
+DESCRIPTION
+    This module enhances Voltaire devices support by extracting model, serial,
+    and firmware information from SNMP OIDs.
+"""
