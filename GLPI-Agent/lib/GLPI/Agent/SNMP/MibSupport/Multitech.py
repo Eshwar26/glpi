@@ -1,79 +1,59 @@
-package GLPI::Agent::SNMP::MibSupport::Multitech;
+# multitech_mib.py
+from typing import Optional
 
-use strict;
-use warnings;
+from glpi_agent_snmp_template import MibSupportTemplate
+from glpi_agent_tools import get_canonical_string
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
+# Multitech MIB constants
+MULTITECH = '.1.3.6.1.4.1.995'
+MTS_ROUTER_SYSTEM_OBJECTS = MULTITECH + '.15.1.1'
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
+MTS_ROUTER_SYSTEM_MODEL_ID = MTS_ROUTER_SYSTEM_OBJECTS + '.1.0'
+MTS_ROUTER_SYSTEM_SERIAL_NUMBER = MTS_ROUTER_SYSTEM_OBJECTS + '.2.0'
+MTS_ROUTER_SYSTEM_FIRMWARE = MTS_ROUTER_SYSTEM_OBJECTS + '.3.0'
 
-use constant multiTech  => '.1.3.6.1.4.1.995';
 
-use constant mtsRouterSystemObjects => multiTech . '.15.1.1';
+class Multitech(MibSupportTemplate):
+    mib_support = [
+        {
+            "name": "multitech",
+            "privateoid": MTS_ROUTER_SYSTEM_MODEL_ID,
+        }
+    ]
 
-use constant mtsRouterSystemModelId         => mtsRouterSystemObjects . '.1.0';
-use constant mtsRouterSystemSerialNumber    => mtsRouterSystemObjects . '.2.0';
-use constant mtsRouterSystemFirmware        => mtsRouterSystemObjects . '.3.0';
+    def get_serial(self) -> Optional[str]:
+        """Return the serial number of the Multitech device."""
+        return get_canonical_string(self.get(MTS_ROUTER_SYSTEM_SERIAL_NUMBER))
 
-# Multitech modules do not support standard MIBs and then won't provide sysObjectID
-# and no hostname.
-# Detection is based on a private OID availability.
-# Hostname is then computed from model and serial number.
+    def get_snmp_hostname(self) -> Optional[str]:
+        """Compute a hostname based on MODEL and serial number."""
+        serial = self.get_serial()
+        if not serial:
+            return None
 
-our $mibSupport = [
-    {
-        name        => "multitech",
-        privateoid  => mtsRouterSystemModelId,
-    }
-];
+        device = self.device
+        if not device:
+            return None
 
-sub getSerial {
-    my ($self) = @_;
+        model = device.get("MODEL")
+        return f"{model}_{serial}" if model else serial
 
-    return getCanonicalString($self->get(mtsRouterSystemSerialNumber));
-}
+    def get_model(self) -> Optional[str]:
+        """Return the device model."""
+        return get_canonical_string(self.get(MTS_ROUTER_SYSTEM_MODEL_ID))
 
-sub getSnmpHostname {
-    my ($self) = @_;
+    def get_firmware(self) -> Optional[str]:
+        """Return the firmware version."""
+        return self.get(MTS_ROUTER_SYSTEM_FIRMWARE)
 
-    my $serial = $self->getSerial()
-        or return;
+    def get_type(self) -> str:
+        """Return the type of device."""
+        return "NETWORKING"
 
-    my $device = $self->device
-        or return;
-
-    return $device->{MODEL}.'_'.$serial;
-}
-
-sub getModel {
-    my ($self) = @_;
-
-    return getCanonicalString($self->get(mtsRouterSystemModelId));
-}
-
-sub getFirmware {
-    my ($self) = @_;
-
-    return $self->get(mtsRouterSystemFirmware);
-}
-
-sub getType {
-    return 'NETWORKING';
-}
-
-sub getManufacturer {
-    return 'Multitech';
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::Multitech - Inventory module for MultiTech
-
-=head1 DESCRIPTION
-
-This module provides MultiTech products support.
+    def get_manufacturer(self) -> str:
+        """Return the manufacturer."""
+        return "Multitech"
+    def run(self):
+        device = self.device
+        if not device:
+            return
