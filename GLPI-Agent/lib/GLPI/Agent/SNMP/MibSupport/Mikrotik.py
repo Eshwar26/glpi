@@ -1,62 +1,47 @@
-package GLPI::Agent::SNMP::MibSupport::Mikrotik;
+# mikrotik_mib.py
+import re
+from typing import Optional
 
-use strict;
-use warnings;
+from glpi_agent_snmp_template import MibSupportTemplate
+from glpi_agent_tools import get_regexp_oid_match
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
+# MIKROTIK-MIB constants
+MIKROTIK_EXPERIMENTAL_MODULE = '.1.3.6.1.4.1.14988.1'
+MTXR_SYSTEM = MIKROTIK_EXPERIMENTAL_MODULE + '.1.7'
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
+MTXR_SERIAL_NUMBER = MTXR_SYSTEM + '.3.0'
+MTXR_FIRMWARE_VERSION = MTXR_SYSTEM + '.4.0'
 
-# See MIKROTIK-MIB
-use constant    mikrotikExperimentalModule  => '.1.3.6.1.4.1.14988.1' ;
-use constant    mtxrSystem => mikrotikExperimentalModule  .'.1.7' ;
 
-use constant    mtxrSerialNumber    => mtxrSystem . '.3.0' ;
-use constant    mtxrFirmwareVersion => mtxrSystem . '.4.0' ;
+class Mikrotik(MibSupportTemplate):
+    mib_support = [
+        {
+            "name": "mikrotik",
+            "sysobjectid": get_regexp_oid_match(MIKROTIK_EXPERIMENTAL_MODULE),
+        }
+    ]
 
-our $mibSupport = [
-    {
-        name        => "mikrotik",
-        sysobjectid => getRegexpOidMatch(mikrotikExperimentalModule)
-    }
-];
+    def get_firmware(self) -> Optional[str]:
+        """Return the firmware version of the Mikrotik device."""
+        return self.get(MTXR_FIRMWARE_VERSION)
 
-sub getFirmware {
-    my ($self) = @_;
+    def get_serial(self) -> Optional[str]:
+        """Return the serial number of the Mikrotik device."""
+        return self.get(MTXR_SERIAL_NUMBER)
 
-    return $self->get(mtxrFirmwareVersion);
-}
+    def get_model(self) -> Optional[str]:
+        """
+        Extract the model from the device DESCRIPTION if it matches RouterOS.
+        """
+        device = self.device
+        if not device:
+            return None
 
-sub getSerial {
-    my ($self) = @_;
+        model = None
+        description = device.get("DESCRIPTION")
+        if description:
+            match = re.match(r"^RouterOS\s+(.*)$", description)
+            if match:
+                model = match.group(1)
 
-    return $self->get(mtxrSerialNumber);
-}
-
-sub getModel {
-    my ($self) = @_;
-
-    my $device = $self->device
-        or return;
-
-    my $model;
-
-    # Extract model from device description for RouterOS based systems
-    ( $model ) = $device->{DESCRIPTION} =~ /^RouterOS\s+(.*)$/
-        if $device->{DESCRIPTION};
-
-    return $model;
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::Mikrotik - Inventory module for Mikrotik devices
-
-=head1 DESCRIPTION
-
-The module fixes Mikrotik SerialNumber & Firmware version support.
+        return model
