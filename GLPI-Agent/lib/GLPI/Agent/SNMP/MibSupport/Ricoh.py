@@ -1,110 +1,78 @@
-package GLPI::Agent::SNMP::MibSupport::Ricoh;
+# ricoh_mib.py
+from glpi_agent_snmp_template import MibSupportTemplate
+from glpi_agent_tools import get_canonical_string, get_regexp_oid_match
 
-use strict;
-use warnings;
-
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
-
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
-
-use constant    mib2        => '.1.3.6.1.2.1' ;
-use constant    enterprises => '.1.3.6.1.4.1' ;
+MIB2 = '.1.3.6.1.2.1'
+ENTERPRISES = '.1.3.6.1.4.1'
 
 # Ricoh-Private-MIB
-use constant    ricoh       => enterprises . '.367';
+RICOH = ENTERPRISES + '.367'
+RICOH_AGENTS_ID = RICOH + '.1.1'
+RICOH_NET_CONT = RICOH + '.3.2.1.6'
 
-use constant    ricohAgentsID   => ricoh . '.1.1' ;
-use constant    ricohNetCont    => ricoh . '.3.2.1.6' ;
+RICOH_ENG_COUNTER = RICOH + '.3.2.1.2.19'
+RICOH_ENG_COUNTER_TYPE = RICOH_ENG_COUNTER + '.5.1.2'
+RICOH_ENG_COUNTER_VALUE = RICOH_ENG_COUNTER + '.5.1.9'
 
-use constant    ricohEngCounter => ricoh . '.3.2.1.2.19' ;
-use constant    ricohEngCounterType     => ricohEngCounter . '.5.1.2';
-use constant    ricohEngCounterValue    => ricohEngCounter . '.5.1.9';
-
-use constant    hostname        => ricohNetCont . '.1.1.7.1';
+HOSTNAME = RICOH_NET_CONT + '.1.1.7.1'
 
 # Printer-MIB
-use constant    printmib                => mib2 . '.43' ;
-use constant    prtGeneralPrinterName   => printmib . '.5.1.1.16.1' ;
+PRINTMIB = MIB2 + '.43'
+PRT_GENERAL_PRINTER_NAME = PRINTMIB + '.5.1.1.16.1'
 
-our $mibSupport = [
-    {
-        name        => "ricoh-printer",
-        sysobjectid => getRegexpOidMatch(ricohAgentsID)
-    }
-];
 
-sub getModel {
-    my ($self) = @_;
+class Ricoh(MibSupportTemplate):
+    mib_support = [
+        {"name": "ricoh-printer", "sysobjectid": get_regexp_oid_match(RICOH_AGENTS_ID)}
+    ]
 
-    return $self->get(prtGeneralPrinterName);
-}
+    def get_model(self) -> str:
+        return self.get(PRT_GENERAL_PRINTER_NAME)
 
-sub getSnmpHostname {
-    my ($self) = @_;
+    def get_snmp_hostname(self) -> str:
+        device = self.device
+        hostname = get_canonical_string(self.get(HOSTNAME))
 
-    my $device = $self->device
-        or return;
+        # Don't override if found hostname is manufacturer+model
+        if hostname == f"RICOH {device.MODEL}":
+            return None
 
-    my $hostname = getCanonicalString($self->get(hostname))
-        or return;
+        return hostname
 
-    # Don't override if found hostname is manufacturer+model
-    return if $hostname eq 'RICOH '.$device->{MODEL};
+    def run(self):
+        device = self.device
 
-    return $hostname;
-}
+        types = self.walk(RICOH_ENG_COUNTER_TYPE)
+        counters = self.walk(RICOH_ENG_COUNTER_VALUE) or {}
 
-sub run {
-    my ($self) = @_;
-
-    my $device = $self->device
-        or return;
-
-    my $types = $self->walk(ricohEngCounterType);
-    if ($types) {
-        my $counters = $self->walk(ricohEngCounterValue) // {};
-
-        my %mapping = (
-            10  => 'TOTAL',
-            200 => 'COPYTOTAL',
-            201 => 'COPYBLACK',
-            202 => 'COPYCOLOR',
-            203 => 'COPYCOLOR',
-            300 => 'FAXTOTAL',
-            400 => 'PRINTTOTAL',
-            401 => 'PRINTBLACK',
-            402 => 'PRINTCOLOR',
-            403 => 'PRINTCOLOR',
-            870 => 'SCANNED',
-            871 => 'SCANNED',
-        );
-
-        my %add_mapping = map { $_ => 1 } (202, 203, 402, 403, 870, 871);
-
-        foreach my $index (sort keys(%{$types})) {
-            my $type  = $types->{$index};
-            my $counter = $mapping{$type}
-                or next;
-            my $count = $counters->{$index}
-                or next;
-            if ($add_mapping{$type} && $device->{PAGECOUNTERS}->{$counter}) {
-                $device->{PAGECOUNTERS}->{$counter} += $count;
-            } else {
-                $device->{PAGECOUNTERS}->{$counter} = $count;
-            }
+        mapping = {
+            10: 'TOTAL',
+            200: 'COPYTOTAL',
+            201: 'COPYBLACK',
+            202: 'COPYCOLOR',
+            203: 'COPYCOLOR',
+            300: 'FAXTOTAL',
+            400: 'PRINTTOTAL',
+            401: 'PRINTBLACK',
+            402: 'PRINTCOLOR',
+            403: 'PRINTCOLOR',
+            870: 'SCANNED',
+            871: 'SCANNED',
         }
-    }
-}
 
-1;
+        add_mapping = {202, 203, 402, 403, 870, 871}
 
-__END__
+        for index in sorted(types.keys()):
+            type_id = types[index]
+            counter_name = mapping.get(type_id)
+            if not counter_name:
+                continue
 
-=head1 NAME
+            count = counters.get(index)
+            if not count:
+                continue
 
-GLPI::Agent::SNMP::MibSupport::Ricoh - Inventory module for Ricoh Printers
-
-=head1 DESCRIPTION
-
-The module enhances Ricoh printers devices support.
+            if type_id in add_mapping and device.PAGECOUNTERS.get(counter_name):
+                device.PAGECOUNTERS[counter_name] += count
+            else:
+                device.PAGECOUNTERS[counter_name] = count
