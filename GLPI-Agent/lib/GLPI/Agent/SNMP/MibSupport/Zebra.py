@@ -1,113 +1,114 @@
-package GLPI::Agent::SNMP::MibSupport::Zebra;
+# GLPI/Agent/SNMP/MibSupport/Zebra.py
 
-use strict;
-use warnings;
+from GLPI.Agent.SNMP.MibSupportTemplate import MibSupportTemplate
+from GLPI.Agent.Tools import getCanonicalString, hex2char, empty
+from GLPI.Agent.Tools.SNMP import getRegexpOidMatch
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
+# Priority for SNMP discovery order
+priority = 7
 
-use constant    priority => 7;
+# --- SNMP OID constants ---
 
-# See ESI-MIB
+# ESI-MIB
+esi = '.1.3.6.1.4.1.683'
+model2 = esi + '.6.2.3.2.1.15.1'
+serial = esi + '.1.5.0'
+fw2 = esi + '.1.9.0'
 
-use constant    esi     => '.1.3.6.1.4.1.683' ;
-use constant    model2  => esi . '.6.2.3.2.1.15.1' ;
-use constant    serial  => esi . '.1.5.0' ;
-use constant    fw2     => esi . '.1.9.0' ;
+# ZEBRA-MIB
+zebra = '.1.3.6.1.4.1.10642'
+zbrGeneralInfo = zebra + '.1'
 
-# See ZEBRA-MIB
+zbrGeneralModel = zbrGeneralInfo + '.1'
+zbrGeneralFirmwareVersion = zbrGeneralInfo + '.2.0'
+zbrGeneralName = zbrGeneralInfo + '.4.0'
+zbrGeneralUniqueId = zbrGeneralInfo + '.9.0'
+zbrGeneralCompanyName = zbrGeneralInfo + '.11.0'
+zbrGeneralLINKOSVersion = zbrGeneralInfo + '.18.0'
 
-use constant    zebra           => '.1.3.6.1.4.1.10642' ;
-use constant    zbrGeneralInfo  => zebra . '.1' ;
+# ZEBRA-QL-MIB
+model1 = zbrGeneralModel + '.0'
+zql_zebra_ql = zebra + '.200'
+model3 = zql_zebra_ql + '.19.7.0'
+serial3 = zql_zebra_ql + '.19.5.0'
 
-use constant    zbrGeneralModel             => zbrGeneralInfo . '.1' ;
-use constant    zbrGeneralFirmwareVersion   => zbrGeneralInfo . '.2.0' ;
-use constant    zbrGeneralName              => zbrGeneralInfo . '.4.0' ;
-use constant    zbrGeneralUniqueId          => zbrGeneralInfo . '.9.0' ;
-use constant    zbrGeneralCompanyName       => zbrGeneralInfo . '.11.0' ;
-use constant    zbrGeneralLINKOSVersion     => zbrGeneralInfo . '.18.0' ;
 
-# See ZEBRA-QL-MIB
-
-use constant    model1  => zbrGeneralModel . '.0' ;
-
-use constant    zql_zebra_ql    => zebra . '.200' ;
-use constant    model3  => zql_zebra_ql . '.19.7.0' ;
-use constant    serial3 => zql_zebra_ql . '.19.5.0' ;
-
-our $mibSupport = [
+# --- MIB Support registration ---
+mibSupport = [
     {
-        name        => "zebra-printer",
-        sysobjectid => getRegexpOidMatch(esi)
+        "name": "zebra-printer",
+        "sysobjectid": getRegexpOidMatch(esi)
     },
     {
-        name        => "zebra-printer-zt",
-        sysobjectid => getRegexpOidMatch(zbrGeneralModel)
+        "name": "zebra-printer-zt",
+        "sysobjectid": getRegexpOidMatch(zbrGeneralModel)
     }
-];
+]
 
-sub getSnmpHostname {
-    my ($self) = @_;
 
-    return getCanonicalString($self->get(zbrGeneralName));
-}
+class Zebra(MibSupportTemplate):
+    """Inventory module for Zebra printers (enhanced SNMP support)."""
 
-sub getManufacturer {
-    my ($self) = @_;
+    def getSnmpHostname(self):
+        """Retrieve the SNMP hostname of the device."""
+        val = self.get(zbrGeneralName)
+        return getCanonicalString(val)
 
-    return getCanonicalString($self->get(zbrGeneralCompanyName)) || 'Zebra Technologies';
-}
+    def getManufacturer(self):
+        """Retrieve manufacturer name."""
+        val = self.get(zbrGeneralCompanyName)
+        return getCanonicalString(val) or "Zebra Technologies"
 
-sub getSerial {
-    my ($self) = @_;
+    def getSerial(self):
+        """Retrieve device serial number (prefers zbrGeneralUniqueId or serial3)."""
+        val = (
+            self.get(zbrGeneralUniqueId)
+            or self.get(serial3)
+            or self.get(serial)
+        )
+        return getCanonicalString(val) or hex2char(val)
 
-    # serial3 is more accurate than serial on GK420 & ZE500
-    return getCanonicalString($self->get(zbrGeneralUniqueId)) || hex2char($self->get(serial3) || $self->get(serial));
-}
+    def getModel(self):
+        """Retrieve model name from several possible OIDs."""
+        val = self.get(model1) or self.get(model2) or self.get(model3)
+        return hex2char(val)
 
-sub getModel {
-    my ($self) = @_;
+    def getFirmware(self):
+        """Retrieve firmware version."""
+        val = self.get(zbrGeneralFirmwareVersion) or self.get(fw2)
+        return hex2char(val)
 
-    return hex2char($self->get(model1) || $self->get(model2) || $self->get(model3));
-}
+    def run(self):
+        """Add firmware details (LinkOS) to the device record."""
+        device = getattr(self, "device", None)
+        if not device:
+            return
 
-sub getFirmware {
-    my ($self) = @_;
+        manufacturer = self.getManufacturer()
+        if not manufacturer:
+            return
 
-    return hex2char($self->get(zbrGeneralFirmwareVersion) || $self->get(fw2));
-}
+        linkos_version = self.get(zbrGeneralLINKOSVersion)
+        if empty(linkos_version):
+            return
 
-sub run {
-    my ($self) = @_;
+        device.addFirmware({
+            "NAME": f"{manufacturer} LinkOS",
+            "DESCRIPTION": f"{manufacturer} LinkOS firmware",
+            "TYPE": "system",
+            "VERSION": getCanonicalString(linkos_version),
+            "MANUFACTURER": manufacturer
+        })
 
-    my $device = $self->device
-        or return;
 
-    my $manufacturer = $self->getManufacturer()
-        or return;
+# --- Documentation equivalent to POD ---
+"""
+NAME
+    GLPI.Agent.SNMP.MibSupport.Zebra - Inventory module for Zebra Printers
 
-    my $linkos_version = $self->get(zbrGeneralLINKOSVersion);
-    unless (empty($linkos_version)) {
-        $device->addFirmware({
-            NAME            => "$manufacturer LinkOS",
-            DESCRIPTION     => "$manufacturer LinkOS firmware",
-            TYPE            => "system",
-            VERSION         => getCanonicalString($linkos_version),
-            MANUFACTURER    => $manufacturer
-        });
-    }
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::Zebra - Inventory module for Zebra Printers
-
-=head1 DESCRIPTION
-
-The module enhances Zebra printers devices support.
+DESCRIPTION
+    This module enhances Zebra printer support by gathering hostname, model,
+    serial, and firmware details using SNMP MIBs (ESI-MIB, ZEBRA-MIB, ZEBRA-QL-MIB),
+    and adds LinkOS firmware information for compatible devices.
+"""
