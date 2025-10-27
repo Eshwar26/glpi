@@ -1,79 +1,77 @@
-package GLPI::Agent::SNMP::MibSupport::WyseThinOS;
+# GLPI/Agent/SNMP/MibSupport/WyseThinOS.py
 
-use strict;
-use warnings;
+from GLPI.Agent.SNMP.MibSupportTemplate import MibSupportTemplate
+from GLPI.Agent.Tools.SNMP import getRegexpOidMatch
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
+# SNMP OIDs (constants)
+enterprises = '.1.3.6.1.4.1'
+wyse = enterprises + '.714'
+ThinClient = wyse + '.1.2'
+SerialNumber = ThinClient + '.6.2.1.0'
 
-use constant    enterprises => '.1.3.6.1.4.1' ;
 
-# WYSE-MIB DEFINITIONS
-use constant    wyse            => enterprises . '.714' ;
-use constant    ThinClient      => wyse . '.1.2' ;
-use constant    SerialNumber    => ThinClient . '.6.2.1.0' ;
-
-our $mibSupport = [
+# MIB Support registration
+mibSupport = [
     {
-        name        => "wyse-thinos",
-        sysobjectid => getRegexpOidMatch(ThinClient)
+        "name": "wyse-thinos",
+        "sysobjectid": getRegexpOidMatch(ThinClient)
     }
-];
+]
 
-sub getType {
-    return 'NETWORKING';
-}
 
-sub getModel {
-    my ($self) = @_;
+class WyseThinOS(MibSupportTemplate):
+    """Inventory module for Dell Wyse ThinClient devices (ThinOS)."""
 
-    my $device = $self->device
-        or return;
+    def getType(self):
+        return "NETWORKING"
 
-    my ($model) = $device->{DESCRIPTION} =~ /^(\S+)/
-        or return;
+    def getModel(self):
+        device = getattr(self, "device", None)
+        if not device or "DESCRIPTION" not in device:
+            return None
 
-    return "Wyse $model";
-}
+        description = device["DESCRIPTION"]
+        parts = description.split(maxsplit=1)
+        model = parts[0] if parts else None
 
-sub getManufacturer {
-    return "Dell";
-}
+        if model:
+            return f"Wyse {model}"
+        return None
 
-sub getSerial {
-    my ($self) = @_;
+    def getManufacturer(self):
+        return "Dell"
 
-    return $self->get(SerialNumber);
-}
+    def getSerial(self):
+        return self.get(SerialNumber)
 
-sub run {
-    my ($self) = @_;
+    def run(self):
+        device = getattr(self, "device", None)
+        if not device or "DESCRIPTION" not in device:
+            return
 
-    my $device = $self->device
-        or return;
+        description = device["DESCRIPTION"]
+        parts = description.split(maxsplit=1)
+        version = parts[1] if len(parts) > 1 else None
 
-    my ($version) = $device->{DESCRIPTION} =~ /^\S+\s+(.*)$/
-        or return;
+        if not version:
+            return
 
-    $device->addFirmware({
-        NAME            => "ThinOS",
-        DESCRIPTION     => "Dell Wyse ThinOS",
-        TYPE            => "system",
-        VERSION         => $version,
-        MANUFACTURER    => "Dell"
-    });
-}
+        device.addFirmware({
+            "NAME": "ThinOS",
+            "DESCRIPTION": "Dell Wyse ThinOS",
+            "TYPE": "system",
+            "VERSION": version,
+            "MANUFACTURER": "Dell"
+        })
 
-1;
 
-__END__
+# Documentation equivalent to POD
+"""
+NAME
+    GLPI.Agent.SNMP.MibSupport.WyseThinOS - Inventory module for Dell ThinClient
 
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::WyseThinOS - Inventory module for Dell ThinClient
-
-=head1 DESCRIPTION
-
-The module tries to enhance the Dell Wyse thinclients support.
+DESCRIPTION
+    This module enhances Dell Wyse ThinClient support by gathering
+    model, firmware, and serial number details through SNMP OIDs.
+"""
