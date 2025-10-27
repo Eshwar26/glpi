@@ -1,67 +1,35 @@
-package GLPI::Agent::SNMP::MibSupport::RNX;
+# rnx_mib.py
+from glpi_agent_snmp_template import MibSupportTemplate
+from glpi_agent_tools import get_canonical_string, get_regexp_oid_match
+import re
 
-use strict;
-use warnings;
-
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
-
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
-
-use constant sysdescr       => '.1.3.6.1.2.1.1.1.0';
+SYSDESCR = '.1.3.6.1.2.1.1.1.0'
 
 # RNX-UPDU-MIB2-MIB
-use constant    rnx         => '.1.3.6.1.4.1.55108' ;
-use constant    upduMib2    => rnx . '.2' ;
+RNX = '.1.3.6.1.4.1.55108'
+UPDU_MIB2 = RNX + '.2'
 
-use constant    upduMib2PDUSerialNumber => upduMib2 . '.1.2.1.5.1' ;
+UPDU_MIB2_PDU_SERIAL_NUMBER = UPDU_MIB2 + '.1.2.1.5.1'
+UPDU_MIB2_ICM_FIRMWARE = UPDU_MIB2 + '.6.2.1.9.1'
 
-use constant    upduMib2ICMFirmware     => upduMib2 . '.6.2.1.9.1' ;
 
-our $mibSupport = [
-    {
-        name        => "rnx-pdu",
-        sysobjectid => getRegexpOidMatch(rnx)
-    }
-];
+class RNX(MibSupportTemplate):
+    mib_support = [
+        {"name": "rnx-pdu", "sysobjectid": get_regexp_oid_match(RNX)}
+    ]
 
-sub getManufacturer {
-    my ($self) = @_;
+    def get_manufacturer(self) -> str:
+        return 'RNX'
 
-    return 'RNX';
-}
+    def get_serial(self) -> str:
+        return get_canonical_string(self.get(UPDU_MIB2_PDU_SERIAL_NUMBER))
 
-sub getSerial {
-    my ($self) = @_;
+    def get_model(self) -> str:
+        sysdescr = get_canonical_string(self.get(SYSDESCR))
+        match = re.match(r'^RNX\s+(.*)\s+\(', sysdescr)
+        if match:
+            return match.group(1)
+        return None
 
-    return getCanonicalString($self->get(upduMib2PDUSerialNumber));
-}
-
-sub getModel {
-    my ($self) = @_;
-
-    my $sysdescr = getCanonicalString($self->get(sysdescr))
-        or return;
-
-    my ($model) = $sysdescr =~ /^RNX\s+(.*)\s+\(/;
-
-    return $model;
-}
-
-sub getFirmware {
-    my ($self) = @_;
-
-    return getCanonicalString($self->get(upduMib2ICMFirmware));
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::RNX - Inventory module for RNX Pdu devices
-
-=head1 DESCRIPTION
-
-The module enhances RNX Pdu devices support.
+    def get_firmware(self) -> str:
+        return get_canonical_string(self.get(UPDU_MIB2_ICM_FIRMWARE))
