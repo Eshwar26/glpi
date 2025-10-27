@@ -1,44 +1,22 @@
-package GLPI::Agent::SNMP::MibSupport::Oki;
+from typing import Optional, Dict, Any
 
-use strict;
-use warnings;
+from GLPI.Agent.SNMP.MibSupportTemplate import MibSupportTemplate
+from GLPI.Agent.Tools import get_canonical_string, get_regexp_oid_match
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
+# Oki MIB constants
+OKI = '.1.3.6.1.4.1.2001'
+MODEL = OKI + '.1.1.1.1.11.1.10.25.0'
+SERIAL = OKI + '.1.1.1.1.11.1.10.45.0'
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
+class Oki(MibSupportTemplate):
+    mib_support = [
+        {"name": "oki", "sysobjectid": get_regexp_oid_match(OKI)}
+    ]
 
-use constant oki    => '.1.3.6.1.4.1.2001';
-use constant model  => oki . '.1.1.1.1.11.1.10.25.0';
-use constant serial => oki . '.1.1.1.1.11.1.10.45.0';
+    def get_serial(self) -> Optional[str]:
+        """Retrieve the serial number of the Oki device."""
+        return self.get(SERIAL)
 
-our $mibSupport = [
-    {
-        name        => "oki",
-        sysobjectid => getRegexpOidMatch(oki)
-    }
-];
-
-sub getSerial {
-    my ($self) = @_;
-
-    return $self->get(serial);
-}
-
-sub getModel {
-    my ($self) = @_;
-
-    return getCanonicalString($self->get(model));
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::Oki - Inventory module for Oki printers
-
-=head1 DESCRIPTION
-
-This module enhances Oki printers support.
+    def get_model(self) -> Optional[str]:
+        """Retrieve the model name of the Oki device."""
+        return get_canonical_string(self.get(MODEL))
