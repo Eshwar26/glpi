@@ -1,106 +1,147 @@
-package GLPI::Agent::SNMP::MibSupport::CheckPoint;
+import re
 
-use strict;
-use warnings;
+# Mock or simple implementations for GLPI Agent functions/tools
+def get_canonical_string(value):
+    if value is None:
+        return None
+    return str(value).strip()
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
+def get_regexp_oid_match(oid):
+    # Assuming it returns a compiled regex for exact prefix match
+    return re.compile(f'^{re.escape(oid)}')
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
+# Simple mock base class for compatibility
+class MibSupportTemplate:
+    def __init__(self):
+        self.device = None  # To be set externally; for testing, can be mocked
 
-use constant checkpoint => '.1.3.6.1.4.1.2620';
+    def get(self, oid):
+        # Mock SNMP get; in real use, implement SNMP fetch
+        # For now, returns mock values to test functionality
+        mock_values = {
+            '.1.3.6.1.4.1.2620.1.6.1.0': 'SVN Foundation',  # svnProdName
+            '.1.3.6.1.4.1.2620.1.6.2.0': 'R80',  # svnProdVerMajor
+            '.1.3.6.1.4.1.2620.1.6.3.0': '10',  # svnProdVerMinor
+            '.1.3.6.1.4.1.2620.1.6.4.1.0': '1.2.3',  # svnVersion
+            '.1.3.6.1.4.1.2620.1.6.4.2.0': '456',  # svnBuild
+            '.1.3.6.1.4.1.2620.1.6.5.1.0': 'Gaia Embedded',  # osName
+            '.1.3.6.1.4.1.2620.1.6.5.2.0': 'R80',  # osMajorVer
+            '.1.3.6.1.4.1.2620.1.6.5.3.0': '10',  # osMinorVer
+            '.1.3.6.1.4.1.2620.1.6.16.3.0': 'SN123456789',  # svnApplianceSerialNumber
+            '.1.3.6.1.4.1.2620.1.6.16.7.0': 'Check Point 1540',  # svnApplianceModel
+            '.1.3.6.1.4.1.2620.1.6.16.9.0': 'Check Point',  # svnApplianceManufacturer
+        }
+        return mock_values.get(oid, None)
 
-use constant svn        => checkpoint . '.1.6';
+# Mock Device class for compatibility
+class Device:
+    def __init__(self):
+        self.firmwares = []  # To store added firmwares
 
-use constant svnProdName        => svn . '.1.0';
-use constant svnProdVerMajor    => svn . '.2.0';
-use constant svnProdVerMinor    => svn . '.3.0';
-use constant svnInfo            => svn . '.4';
-use constant svnOSInfo          => svn . '.5';
-use constant svnApplianceInfo   => svn . '.16';
+    def add_firmware(self, fw_dict):
+        self.firmwares.append(fw_dict)
+        print(f"Added firmware: {fw_dict}")
 
-use constant svnVersion         => svnInfo . '.1.0';
-use constant svnBuild           => svnInfo . '.2.0';
+# Constants
+CHECKPOINT = '.1.3.6.1.4.1.2620'
 
-use constant osName             => svnOSInfo . '.1.0';
-use constant osMajorVer         => svnOSInfo . '.2.0';
-use constant osMinorVer         => svnOSInfo . '.3.0';
+SVN = CHECKPOINT + '.1.6'
 
-use constant svnApplianceSerialNumber   => svnApplianceInfo . '.3.0';
-use constant svnApplianceModel          => svnApplianceInfo . '.7.0';
-use constant svnApplianceManufacturer   => svnApplianceInfo . '.9.0';
+SVN_PROD_NAME = SVN + '.1.0'
+SVN_PROD_VER_MAJOR = SVN + '.2.0'
+SVN_PROD_VER_MINOR = SVN + '.3.0'
+SVN_INFO = SVN + '.4'
+SVN_OS_INFO = SVN + '.5'
+SVN_APPLIANCE_INFO = SVN + '.16'
 
-our $mibSupport = [
+SVN_VERSION = SVN_INFO + '.1.0'
+SVN_BUILD = SVN_INFO + '.2.0'
+
+OS_NAME = SVN_OS_INFO + '.1.0'
+OS_MAJOR_VER = SVN_OS_INFO + '.2.0'
+OS_MINOR_VER = SVN_OS_INFO + '.3.0'
+
+SVN_APPLIANCE_SERIAL_NUMBER = SVN_APPLIANCE_INFO + '.3.0'
+SVN_APPLIANCE_MODEL = SVN_APPLIANCE_INFO + '.7.0'
+SVN_APPLIANCE_MANUFACTURER = SVN_APPLIANCE_INFO + '.9.0'
+
+mib_support = [
     {
-        name        => "CheckPoint",
-        sysobjectid => getRegexpOidMatch(checkpoint)
+        'name': 'CheckPoint',
+        'sysobjectid': get_regexp_oid_match(CHECKPOINT)
     }
-];
+]
 
-sub getFirmware {
-    my ($self) = @_;
+class CheckPoint(MibSupportTemplate):
+    def get_firmware(self):
+        version = self.get(SVN_VERSION)
+        build = self.get(SVN_BUILD)
+        if version and build:
+            return get_canonical_string(f"{version} (build {build})")
+        return None
 
-    return getCanonicalString($self->get(svnVersion).' (build '.$self->get(svnBuild).')');
-}
+    def get_serial(self):
+        return get_canonical_string(self.get(SVN_APPLIANCE_SERIAL_NUMBER))
 
-sub getSerial {
-    my ($self) = @_;
+    def get_manufacturer(self):
+        return get_canonical_string(self.get(SVN_APPLIANCE_MANUFACTURER))
 
-    return getCanonicalString($self->get(svnApplianceSerialNumber));
-}
+    def get_model(self):
+        return get_canonical_string(self.get(SVN_APPLIANCE_MODEL))
 
-sub getManufacturer {
-    my ($self) = @_;
+    def run(self):
+        device = self.device
+        if not device:
+            return
 
-    return getCanonicalString($self->get(svnApplianceManufacturer));
-}
+        manufacturer = self.get_manufacturer()
+        if not manufacturer:
+            return
 
-sub getModel {
-    my ($self) = @_;
+        svn_prod_ver_major = self.get(SVN_PROD_VER_MAJOR)
+        if svn_prod_ver_major is not None:
+            prod_name = get_canonical_string(self.get(SVN_PROD_NAME))
+            prod_minor = get_canonical_string(self.get(SVN_PROD_VER_MINOR))
+            version = f"{svn_prod_ver_major}.{prod_minor}"
+            fw_dict = {
+                'NAME': prod_name,
+                'DESCRIPTION': f"{manufacturer} SVN version",
+                'TYPE': 'system',
+                'VERSION': version,
+                'MANUFACTURER': manufacturer
+            }
+            device.add_firmware(fw_dict)
 
-    return getCanonicalString($self->get(svnApplianceModel));
-}
+        os_major_ver = self.get(OS_MAJOR_VER)
+        if os_major_ver is not None:
+            os_name = get_canonical_string(self.get(OS_NAME))
+            os_minor = get_canonical_string(self.get(OS_MINOR_VER))
+            version = f"{os_major_ver}.{os_minor}"
+            fw_dict = {
+                'NAME': os_name,
+                'DESCRIPTION': f"{manufacturer} OS version",
+                'TYPE': 'system',
+                'VERSION': version,
+                'MANUFACTURER': manufacturer
+            }
+            device.add_firmware(fw_dict)
 
-sub run {
-    my ($self) = @_;
+# For testing/standalone run (optional)
+if __name__ == "__main__":
+    # Test instantiation
+    checkpoint = CheckPoint()
+    checkpoint.device = Device()
+    print("Firmware:", checkpoint.get_firmware())
+    print("Serial:", checkpoint.get_serial())
+    print("Manufacturer:", checkpoint.get_manufacturer())
+    print("Model:", checkpoint.get_model())
+    print("Before run - Firmwares:", len(checkpoint.device.firmwares))
+    checkpoint.run()
+    print("After run - Firmwares:", len(checkpoint.device.firmwares))
+    print("Module loaded and run successfully without errors.")
 
-    my $device = $self->device
-        or return;
-
-    my $manufacturer = $self->getManufacturer()
-        or return;
-
-    my $svnProdVerMajor = $self->get(svnProdVerMajor);
-    if (defined($svnProdVerMajor)) {
-        $device->addFirmware({
-            NAME            => getCanonicalString($self->get(svnProdName)),
-            DESCRIPTION     => "$manufacturer SVN version",
-            TYPE            => "system",
-            VERSION         => getCanonicalString($svnProdVerMajor).'.'.getCanonicalString($self->get(svnProdVerMinor)),
-            MANUFACTURER    => $manufacturer
-        });
-    }
-
-    my $osMajorVer = $self->get(osMajorVer);
-    if (defined($osMajorVer)) {
-        $device->addFirmware({
-            NAME            => getCanonicalString($self->get(osName)),
-            DESCRIPTION     => "$manufacturer OS version",
-            TYPE            => "system",
-            VERSION         => getCanonicalString($osMajorVer).'.'.getCanonicalString($self->get(osMinorVer)),
-            MANUFACTURER    => $manufacturer
-        });
-    }
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
+"""
 GLPI::Agent::SNMP::MibSupport::CheckPoint - Inventory module for CheckPoint appliance
 
-=head1 DESCRIPTION
-
 This module enhances CheckPoint appliances support.
+"""
