@@ -1,108 +1,57 @@
-package GLPI::Agent::SNMP::MibSupport::Lexmark;
+# kyocera_mib_support.py
+# Converted from Perl: GLPI::Agent::SNMP::MibSupport::Kyocera
 
-use strict;
-use warnings;
+def get_canonical_string(value):
+    """Convert value to canonical string format"""
+    if not value:
+        return None
+    # Remove leading/trailing whitespace and normalize spaces
+    return ' '.join(str(value).strip().split())
 
-use parent 'GLPI::Agent::SNMP::MibSupportTemplate';
+def get_regexp_oid_match(oid):
+    """Convert OID to regex pattern for matching"""
+    if not oid:
+        return None
+    # Escape dots in OID and add regex pattern
+    return '^' + oid.replace('.', '\\.') + '.*'
+class SNMPBase:
+    """
+    Base class for SNMP support implementations
+    Basic implementation of common SNMP functionality
+    """
+    def __init__(self):
+        self.data = {}
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::SNMP;
+    def get(self, oid):
+        """Get SNMP value for given OID"""
+        return self.data.get(oid)
 
-use constant    enterprises => '.1.3.6.1.4.1';
+# Constants equivalent to Perl's `use constant`
+PRIORITY = 7
 
-# LEXMARK-ROOT-MIB
-use constant    lexmark => enterprises . '.641';
+KYOCERA = ".1.3.6.1.4.1.1347"
+SYSNAME = f"{KYOCERA}.40.10.1.1.5.1"
+KYOCERA_PRINTER = f"{KYOCERA}.41"
 
-# LEXMARK-PVT-MIB
-use constant    printer => lexmark . '.2';
-
-use constant    prtgenInfoEntry => printer . '1.2.1';
-
-use constant    prtgenPrinterName   => prtgenInfoEntry . '.2.1' ;
-use constant    prtgenCodeRevision  => prtgenInfoEntry . '.4.1' ;
-use constant    prtgenSerialNo      => prtgenInfoEntry . '.6.1' ;
-
-# LEXMARK-MPS-MIB
-use constant    mps => lexmark . '.6' ;
-
-use constant    device      => mps . '.2';
-use constant    inventory   => mps . '.3';
-
-# OID name for the 2 following are extrapolated
-use constant    deviceModel     => device . '.3.1.4.1';
-use constant    deviceSerial    => device . '.3.1.5.1';
-
-use constant    hwInventorySerialNumber => inventory . '.1.1.7.1.1';
-use constant    swInventoryRevision     => inventory . '.3.1.7.1.1' ;
-
-# Printer-MIB
-use constant    prtGeneralSerialNumber  => '.1.3.6.1.2.1.43.5.1.1.17.1';
-
-# HOST-RESOURCES-MIB
-use constant    hrDeviceDescr   => '.1.3.6.1.2.1.25.3.2.1.3.1';
-
-our $mibSupport = [
+# MIB support definition
+MIB_SUPPORT = [
     {
-        name        => "lexmark-printer",
-        sysobjectid => getRegexpOidMatch(lexmark)
+        "name": "kyocera",
+        "sysobjectid": get_regexp_oid_match(KYOCERA_PRINTER),
     }
-];
+]
 
-sub getModel {
-    my ($self) = @_;
 
-    my $model;
-    foreach my $oid (deviceModel, prtgenPrinterName) {
-        $model = getCanonicalString($self->get($oid))
-            and last;
-    }
+class KyoceraMibSupport(SNMPBase):
+    """
+    Python equivalent of GLPI::Agent::SNMP::MibSupport::Kyocera
 
-    unless ($model) {
-        $model = getCanonicalString($self->get(hrDeviceDescr))
-            or return;
-        ($model) = $model =~ /^(Lexmark\s+\S+)/;
-    }
+    Provides SNMP inventory support for Kyocera printers.
+    """
 
-    return unless $model;
+    priority = PRIORITY
 
-    # Strip manufacturer
-    $model =~ s/^Lexmark\s+//i;
-
-    return $model;
-}
-
-sub getFirmware {
-    my ($self) = @_;
-
-    my $firmware;
-    foreach my $oid (swInventoryRevision, prtgenCodeRevision) {
-        $firmware = getCanonicalString($self->get($oid))
-            and last;
-    }
-
-    return $firmware;
-}
-
-sub getSerial {
-    my ($self) = @_;
-
-    my $serial;
-    foreach my $oid (prtGeneralSerialNumber, deviceSerial, prtgenSerialNo) {
-        $serial = getCanonicalString($self->get($oid))
-            and last;
-    }
-
-    return $serial;
-}
-
-1;
-
-__END__
-
-=head1 NAME
-
-GLPI::Agent::SNMP::MibSupport::Lexmark - Inventory module for Lexmark Printers
-
-=head1 DESCRIPTION
-
-The module enhances Lexmark printers devices support.
+    def get_snmp_hostname(self):
+        """Retrieve and normalize the SNMP system name."""
+        sys_name = self.get(SYSNAME)
+        return get_canonical_string(sys_name) if sys_name else None
