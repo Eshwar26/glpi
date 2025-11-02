@@ -192,7 +192,7 @@ class InventoryTask(GLPITask):
             Task result or None
         """
         # Warn if not running as root/admin
-        if os.getuid() != 0:
+        if hasattr(os, 'getuid') and os.getuid() != 0:
             self.logger.warning(
                 "You should execute this task as super-user"
             )

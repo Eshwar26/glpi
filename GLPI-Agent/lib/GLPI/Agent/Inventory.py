@@ -881,7 +881,10 @@ class Inventory:
         if path == '-':
             handle = sys.stdout
             file_path = path
-        elif os.path.isdir(path):
+        elif os.path.isdir(path) or not os.path.exists(path):
+            # Create directory if it doesn't exist
+            if not os.path.exists(path):
+                os.makedirs(path, exist_ok=True)
             file_path = os.path.join(path, f"{self.getDeviceId()}.{format_type}")
         else:
             file_path = path
