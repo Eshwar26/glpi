@@ -1,14 +1,25 @@
-package GLPI::Test::Module;
+#!/usr/bin/env python3
+"""Test Module - Simple utility functions for testing"""
 
-use strict;
-use warnings;
 
-sub mirror {
-    return $_[0];
-}
+def mirror(value):
+    """
+    Return the value unchanged (mirror function).
+    
+    Args:
+        value: Any value to return
+        
+    Returns:
+        The same value
+    """
+    return value
 
-sub loop {
-    while (1) {};
-}
 
-1;
+def loop():
+    """
+    Infinite loop (used for testing).
+    
+    Note: This function will run forever until interrupted.
+    """
+    while True:
+        pass

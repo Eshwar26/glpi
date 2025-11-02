@@ -1,3 +1,6 @@
-package Win32::API;
+#!/usr/bin/env python3
+"""Win32::API fake module for non-Windows platforms"""
 
-1;
+# Empty module - just a placeholder for imports
+
+__all__ = []

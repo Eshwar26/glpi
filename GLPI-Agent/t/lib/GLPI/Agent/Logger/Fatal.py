@@ -1,28 +1,29 @@
-package GLPI::Agent::Logger::Fatal;
+#!/usr/bin/env python3
+"""Fatal Logger Backend - Raises exceptions on log messages for testing"""
 
-use strict;
-use warnings;
 
-use parent 'GLPI::Agent::Logger::Backend';
-
-use English qw(-no_match_vars);
-use Carp;
-
-use constant    test => 1;
-
-sub new {
-    my ($class, $params) = @_;
-
-    my $self = {};
-    bless $self, $class;
-
-    return $self;
-}
-
-sub addMessage {
-    my ($self, %params) = @_;
-
-    croak $params{message};
-}
-
-1;
+class Fatal:
+    """Logger backend that raises exceptions when messages are logged"""
+    
+    def __init__(self, params=None):
+        """
+        Initialize fatal logger backend.
+        
+        Args:
+            params: Optional parameters (unused)
+        """
+        pass
+    
+    def addMessage(self, message=None, **kwargs):
+        """
+        Add a message by raising an exception.
+        
+        Args:
+            message: The message to raise as exception
+            **kwargs: Additional parameters (unused)
+            
+        Raises:
+            Exception: Always raises with the message
+        """
+        msg = message if message else kwargs.get('message', 'Fatal logger called')
+        raise Exception(msg)

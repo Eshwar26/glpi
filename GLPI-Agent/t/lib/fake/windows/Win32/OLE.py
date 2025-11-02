@@ -1,25 +1,23 @@
-package Win32::OLE;
+#!/usr/bin/env python3
+"""Win32::OLE fake module for non-Windows platforms"""
 
-use strict;
-use warnings;
+# Constants
+CP_UTF8 = 0
 
-use constant CP_UTF8 => 0;
+# Mock constants for OLE
+VT_BYREF = None
+VT_BSTR = None
 
-$INC{'Win32/OLE/Const.pm'} = 1;
-$INC{'Win32/OLE/Enum.pm'} = 1;
-$INC{'Win32/OLE/Variant.pm'} = 1;
 
-sub import {
-    my $callpkg = caller();
-    no strict 'refs';
+def in_func():
+    """Mock 'in' function"""
+    pass
 
-    *{"$callpkg\::in"}       = sub {};
-    *{"$callpkg\::CP_UTF8"}  = sub {};
-    *{"$callpkg\::VT_BYREF"} = sub {};
-    *{"$callpkg\::VT_BSTR"}  = sub {};
-}
 
-sub Option {
-}
+def Option(*args, **kwargs):
+    """Mock Option function"""
+    pass
 
-1;
+
+# Module-level exports for compatibility
+__all__ = ['CP_UTF8', 'VT_BYREF', 'VT_BSTR', 'in_func', 'Option']

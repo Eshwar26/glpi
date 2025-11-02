@@ -1,14 +1,13 @@
-package
-    Getopt;
+#!/usr/bin/env python3
+"""Getopt - Command-line option parsing for installer"""
 
-use strict;
-use warnings;
+import sys
+import re
+from typing import Dict, Optional, Any
 
-BEGIN {
-    $INC{"Getopt.pm"} = __FILE__;
-}
 
-my @options = (
+# Define all available options
+_OPTIONS = [
     'backend-collect-timeout=i',
     'ca-cert-file=s',
     'clean',
@@ -64,61 +63,122 @@ my @options = (
     'use-current-user-proxy',
     'verbose|v',
     'version',
-);
+]
 
-my %options;
-foreach my $opt (@options) {
-    my ($plus)   = $opt =~ s/\+$//;
-    my ($string) = $opt =~ s/=s$//;
-    my ($int)    = $opt =~ s/=i$//;
-    my ($long, $short) = $opt =~ /^([^|]+)[|]?(.)?$/;
-    $options{"--$long"} = [ $plus, $string, $int, $long ];
-    $options{"-$short"} = $options{"--$long"} if $short;
-}
 
-sub GetOptions {
+def _parse_option_spec(opt_spec: str) -> tuple:
+    """
+    Parse option specification.
+    
+    Args:
+        opt_spec: Option specification string (e.g., "server|s=s", "clean", "debug|d=i")
+        
+    Returns:
+        Tuple of (plus_flag, is_string, is_int, long_name, short_name)
+    """
+    plus = opt_spec.endswith('+')
+    if plus:
+        opt_spec = opt_spec[:-1]
+    
+    is_string = opt_spec.endswith('=s')
+    if is_string:
+        opt_spec = opt_spec[:-2]
+    
+    is_int = opt_spec.endswith('=i')
+    if is_int:
+        opt_spec = opt_spec[:-2]
+    
+    # Parse long|short format
+    match = re.match(r'^([^|]+)(?:\|(.))?$', opt_spec)
+    if match:
+        long_name = match.group(1)
+        short_name = match.group(2)
+    else:
+        long_name = opt_spec
+        short_name = None
+    
+    return (plus, is_string, is_int, long_name, short_name)
 
-    my $options = {};
 
-    my ($plus, $string, $int, $long);
+# Build options lookup table
+_OPTIONS_MAP: Dict[str, tuple] = {}
+for opt in _OPTIONS:
+    plus, is_string, is_int, long_name, short_name = _parse_option_spec(opt)
+    _OPTIONS_MAP[f"--{long_name}"] = (plus, is_string, is_int, long_name)
+    if short_name:
+        _OPTIONS_MAP[f"-{short_name}"] = (plus, is_string, is_int, long_name)
 
-    while (@ARGV) {
-        my $argv = shift @ARGV;
-        if ($argv =~ /^(-[^=]*)=?(.+)?$/) {
-            my $opt = $options{$1}
-                or return;
-            ( $plus, $string, $int, $long) = @{$opt};
-            if ($plus) {
-                $options->{$long}++;
-                undef $long;
-            } elsif (defined($2) && $int) {
-                $options->{$long} = int($2);
-                undef $long;
-            } elsif ($string) {
-                $options->{$long} = $2;
-            } else {
-                $options->{$long} = 1;
-                undef $long;
-            }
-        } elsif ($long) {
-            if ($int) {
-                $options->{$long} = int($argv);
-                undef $long;
-            } elsif ($string) {
-                $options->{$long} .= " " if $options->{$long};
-                $options->{$long} .= $argv;
-            }
-        } else {
-            return;
-        }
-    }
 
-    return $options;
-}
+def GetOptions() -> Optional[Dict[str, Any]]:
+    """
+    Parse command-line options.
+    
+    Returns:
+        Dictionary of parsed options, or None on error
+    """
+    options: Dict[str, Any] = {}
+    args = sys.argv[1:]
+    
+    i = 0
+    pending_long = None
+    
+    while i < len(args):
+        arg = args[i]
+        
+        # Match option format: -option[=value] or --option[=value]
+        match = re.match(r'^(-[^=]*)=?(.+)?$', arg)
+        if match:
+            opt_key = match.group(1)
+            value = match.group(2) if match.group(2) else None
+            
+            if opt_key not in _OPTIONS_MAP:
+                return None
+            
+            plus, is_string, is_int, long_name = _OPTIONS_MAP[opt_key]
+            
+            if plus:
+                # Increment option
+                options[long_name] = options.get(long_name, 0) + 1
+                pending_long = None
+            elif value and is_int:
+                # Integer value provided with =
+                options[long_name] = int(value)
+                pending_long = None
+            elif is_string and value:
+                # String value provided with =
+                options[long_name] = value
+                pending_long = None
+            elif is_string or is_int:
+                # Option requires value, expect it in next arg
+                pending_long = (long_name, is_int, is_string)
+            else:
+                # Boolean flag
+                options[long_name] = 1
+                pending_long = None
+        elif pending_long:
+            # Process pending option value
+            long_name, is_int, is_string = pending_long
+            if is_int:
+                options[long_name] = int(arg)
+            elif is_string:
+                # Append if already exists (for multi-value strings)
+                if long_name in options:
+                    options[long_name] += " " + arg
+                else:
+                    options[long_name] = arg
+            pending_long = None
+        else:
+            # Invalid argument
+            return None
+        
+        i += 1
+    
+    return options
 
-sub Help {
-    return  <<'HELP';
-glpi-agent-linux-installer [options]
+
+def Help() -> str:
+    """Get help text"""
+    return """glpi-agent-linux-installer [options]
 
   Target definition options:
     -s --server=URI                configure agent GLPI server
@@ -214,7 +274,5 @@ glpi-agent-linux-installer [options]
     --snap                         install snap package instead of using system packaging
     --skip=PKG_LIST                don't try to install listed packages
     -h --help                      print this help
-HELP
-}
+"""
 
-1;

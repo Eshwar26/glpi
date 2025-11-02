@@ -1,19 +1,27 @@
-package Sys::Syslog;
+#!/usr/bin/env python3
+"""Sys::Syslog fake module for Windows platforms"""
 
-use strict;
-use warnings;
+# Log level constants
+LOG_ERR = 3
+LOG_WARNING = 4
+LOG_INFO = 6
+LOG_DEBUG = 7
 
-sub import {
-    my $callpkg = caller();
-    no strict 'refs';
 
-    *{"$callpkg\::LOG_ERR"}     = sub {};
-    *{"$callpkg\::LOG_WARNING"} = sub {};
-    *{"$callpkg\::LOG_INFO"}    = sub {};
-    *{"$callpkg\::LOG_DEBUG"}   = sub {};
-    *{"$callpkg\::syslog"}      = sub {};
-    *{"$callpkg\::openlog"}     = sub {};
-    *{"$callpkg\::closelog"}    = sub {};
-}
+def syslog(*args, **kwargs):
+    """Mock syslog function - no-op"""
+    pass
 
-1;
+
+def openlog(*args, **kwargs):
+    """Mock openlog function - no-op"""
+    pass
+
+
+def closelog():
+    """Mock closelog function - no-op"""
+    pass
+
+
+__all__ = ['LOG_ERR', 'LOG_WARNING', 'LOG_INFO', 'LOG_DEBUG', 
+           'syslog', 'openlog', 'closelog']

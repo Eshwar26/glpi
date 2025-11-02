@@ -1,6 +1,6 @@
-package Win32;
+#!/usr/bin/env python3
+"""Win32 fake module for non-Windows platforms"""
 
-use strict;
-use warnings;
+# Empty module - just a placeholder for imports
 
-1;
+__all__ = []

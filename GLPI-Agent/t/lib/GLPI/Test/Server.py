@@ -1,234 +1,271 @@
-package GLPI::Test::Server;
+#!/usr/bin/env python3
+"""Test Server Module - HTTP server for testing"""
 
-use warnings;
-use strict;
-use parent qw(HTTP::Server::Simple::CGI HTTP::Server::Simple::Authen);
+import os
+import sys
+import socket
+import threading
+import base64
+import platform
+from pathlib import Path
+from typing import Optional, Dict, Callable, Any
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
-use English qw(-no_match_vars);
-use IO::Socket::SSL;
-use Socket;
+try:
+    import ssl
+except ImportError:
+    ssl = None
 
-use GLPI::Test::Auth;
+# Add lib to path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / 'lib'))
 
-my $dispatch_table = {};
+try:
+    from GLPI.Test.Auth import Auth
+except ImportError:
+    # Fallback Auth class
+    class Auth:
+        def __init__(self, user, password):
+            self.user = user
+            self.password = password
+        def check(self, user, password):
+            return user == self.user and password == self.password
+        def check_auth_header(self, auth_header):
+            if not auth_header or not auth_header.startswith('Basic '):
+                return False
+            try:
+                encoded = auth_header[6:]
+                decoded = base64.b64decode(encoded).decode('utf-8')
+                u, p = decoded.split(':', 1)
+                return self.check(u, p)
+            except:
+                return False
 
-=head1 OVERLOADED METHODS
+# Global dispatch table and PID
+_dispatch_table: Dict[str, Any] = {}
+pid: Optional[int] = None
+_server_instance: Optional['TestServer'] = None
 
-=cut
 
-our $pid;
+class CGIEnvironment:
+    """CGI-like environment wrapper"""
+    
+    def __init__(self, handler: BaseHTTPRequestHandler):
+        """Initialize with HTTP request handler"""
+        self.handler = handler
+        self._path_info = handler.path.split('?')[0]
+        
+        # Parse query string
+        parsed = urlparse(handler.path)
+        self.query_string = parsed.query
+        self.query_params = parse_qs(self.query_string)
+    
+    def path_info(self) -> str:
+        """Get PATH_INFO"""
+        return self._path_info
+    
+    def header(self, **kwargs) -> str:
+        """Generate HTTP header"""
+        return ""
+    
+    def start_html(self, title: str = "") -> str:
+        """Generate HTML start"""
+        return f"<html><head><title>{title}</title></head><body>"
+    
+    def h1(self, text: str) -> str:
+        """Generate H1 tag"""
+        return f"<h1>{text}</h1>"
+    
+    def end_html(self) -> str:
+        """Generate HTML end"""
+        return "</body></html>"
 
-sub new {
-    die 'An instance of Test::Server has already been started.' if $pid;
 
-    my $class = shift;
-    my %params = (
-        port => 8080,
-        ssl  => 0,
-        crt  => undef,
-        key  => undef,
-        @_
-    );
+class TestHTTPRequestHandler(BaseHTTPRequestHandler):
+    """HTTP request handler for test server"""
+    
+    def __init__(self, *args, server=None, **kwargs):
+        """Initialize with server reference"""
+        self.test_server = server
+        super().__init__(*args, **kwargs)
+    
+    def log_message(self, format, *args):
+        """Suppress default logging"""
+        pass
+    
+    def do_GET(self):
+        """Handle GET requests"""
+        self.handle_request()
+    
+    def do_POST(self):
+        """Handle POST requests"""
+        self.handle_request()
+    
+    def handle_request(self):
+        """Handle HTTP request"""
+        # Check authentication if required
+        if self.test_server.user or self.test_server.password:
+            auth_header = self.headers.get('Authorization')
+            if not self.test_server.auth_handler.check_auth_header(auth_header):
+                self.send_response(401)
+                self.send_header('WWW-Authenticate', 'Basic realm="Test Server"')
+                self.end_headers()
+                self.wfile.write(b'Authentication required.')
+                return
+        
+        # Create CGI-like environment
+        cgi = CGIEnvironment(self)
+        path = cgi.path_info()
+        
+        # Look up handler in dispatch table
+        handler = _dispatch_table.get(path)
+        
+        if handler:
+            if callable(handler):
+                # Call handler function
+                handler(self.test_server, cgi)
+            else:
+                # Return static content
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html')
+                self.end_headers()
+                if isinstance(handler, bytes):
+                    self.wfile.write(handler)
+                else:
+                    self.wfile.write(handler.encode('utf-8'))
+        else:
+            # 404 Not found
+            self.send_response(404)
+            self.send_header('Content-Type', 'text/html')
+            self.end_headers()
+            html = cgi.start_html('Not found') + cgi.h1('Not found') + cgi.end_html()
+            self.wfile.write(html.encode('utf-8'))
+        
+        # Fix for CONTENT_LENGTH environment variable
+        if 'CONTENT_LENGTH' in os.environ:
+            del os.environ['CONTENT_LENGTH']
 
-    my $self = $class->SUPER::new($params{port});
 
-    $self->{user}     = $params{user};
-    $self->{password} = $params{password};
-    $self->{ssl}      = $params{ssl};
-    $self->{crt}      = $params{crt};
-    $self->{key}      = $params{key};
+class TestServer:
+    """HTTP test server"""
+    
+    def __init__(self, port: int = 8080, ssl: bool = False, 
+                 crt: Optional[str] = None, key: Optional[str] = None,
+                 user: Optional[str] = None, password: Optional[str] = None,
+                 host: str = '127.0.0.1'):
+        """
+        Initialize test server.
+        
+        Args:
+            port: Port number (default: 8080)
+            ssl: Enable SSL/TLS
+            crt: Path to SSL certificate file
+            key: Path to SSL private key file
+            user: Username for basic authentication
+            password: Password for basic authentication
+            host: Host address (default: 127.0.0.1)
+        
+        Raises:
+            RuntimeError: If server instance already exists
+        """
+        global pid, _server_instance
+        
+        if pid is not None or _server_instance is not None:
+            raise RuntimeError('An instance of Test::Server has already been started.')
+        
+        self.port = port
+        self.host = host
+        self.user = user
+        self.password = password
+        self.ssl_enabled = ssl
+        self.crt = crt
+        self.key = key
+        
+        # Create authentication handler
+        self.auth_handler = Auth(user or '', password or '')
+        
+        # Create HTTP server
+        def handler_factory(*args, **kwargs):
+            return TestHTTPRequestHandler(*args, server=self, **kwargs)
+        
+        self.server = HTTPServer((host, port), handler_factory)
+        
+        # Setup SSL if enabled
+        if ssl and ssl is not None:
+            if not self.crt or not self.key:
+                raise ValueError("SSL certificate and key files required for SSL")
+            
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(self.crt, self.key)
+            self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
+        
+        _server_instance = self
+    
+    def set_dispatch(self, dispatch_table: Dict[str, Any]):
+        """
+        Set dispatch table for request routing.
+        
+        Args:
+            dispatch_table: Dictionary mapping paths to handlers or content
+        """
+        global _dispatch_table
+        _dispatch_table = dispatch_table
+    
+    def background(self) -> int:
+        """
+        Start server in background.
+        
+        Returns:
+            Thread identifier
+        """
+        global pid
+        
+        def run_server():
+            """Run server in thread"""
+            try:
+                self.server.serve_forever()
+            except Exception:
+                pass
+        
+        thread = threading.Thread(target=run_server, daemon=True)
+        thread.start()
+        
+        # Use thread ID as "pid"
+        pid = thread.ident
+        
+        # Give server time to start
+        import time
+        time.sleep(1)
+        
+        return pid
+    
+    def root(self) -> str:
+        """
+        Get server root URL.
+        
+        Returns:
+            Server URL string
+        """
+        protocol = 'https' if self.ssl_enabled else 'http'
+        return f"{protocol}://{self.host}:{self.port}"
+    
+    @staticmethod
+    def stop():
+        """Stop the server"""
+        global pid, _server_instance
+        
+        if _server_instance:
+            try:
+                _server_instance.server.shutdown()
+                _server_instance.server.server_close()
+            except:
+                pass
+            _server_instance = None
+        
+        pid = None
 
-    $self->host('127.0.0.1');
 
-    return $self;
-}
-
-sub authen_handler {
-    my ($self) = @_;
-    return GLPI::Test::Auth->new(
-        user     => $self->{user},
-        password => $self->{password}
-    );
-}
-
-sub handle_request {
-    my $self = shift;
-    my $cgi  = shift;
-
-    my $path = $cgi->path_info();
-    my $handler = $dispatch_table->{$path};
-
-    if ($handler) {
-        if (ref($handler) eq "CODE") {
-            $handler->($self, $cgi);
-        } else {
-            print "HTTP/1.0 200 OK\r\n";
-            print "\r\n";
-            print $handler;
-        }
-    } else {
-        print "HTTP/1.0 404 Not found\r\n";
-        print
-        $cgi->header(),
-        $cgi->start_html('Not found'),
-        $cgi->h1('Not found'),
-        $cgi->end_html();
-    }
-
-    # fix for strange bug under Test::Harness
-    # where HTTP::Server::Simple::CGI::Environment::header
-    # keep appending value to this variable
-    delete $ENV{CONTENT_LENGTH};
-}
-
-# overriden to add status to return code in the headers
-sub authenticate {
-    my $self = shift;
-    my $user = $self->do_authenticate();
-    unless (defined $user) {
-        my $realm = $self->authen_realm();
-        print "HTTP/1.0 401 Authentication required\r\n";
-        print qq(WWW-Authenticate: Basic realm="$realm"\r\n\r\n);
-        print "Authentication required.";
-        return;
-    }
-    return $user;
-}
-
-sub print_banner {
-}
-
-sub accept_hook {
-    my $self = shift;
-
-    return unless $self->{ssl};
-    my $fh   = $self->stdio_handle;
-
-    $self->SUPER::accept_hook(@_);
-
-    my $newfh = IO::Socket::SSL->start_SSL($fh,
-        SSL_server    => 1,
-        SSL_use_cert  => 1,
-        SSL_cert_file => $self->{crt},
-        SSL_key_file  => $self->{key},
-    );
-
-    $self->stdio_handle($newfh) if $newfh;
-}
-
-=head1 METHODS UNIQUE TO TestServer
-
-=cut
-
-sub set_dispatch {
-    my $self = shift;
-    $dispatch_table = shift;
-
-    return;
-}
-
-sub background {
-    my $self = shift;
-
-    $pid = $self->SUPER::background()
-        or Carp::confess( q{Can't start the test server} );
-
-    sleep 1; # background() may come back prematurely, so give it a second to fire up
-
-    return $pid;
-}
-
-# Use updated _process_request() to avoid error on undefined $remote_sockaddr
-sub _process_request {
-    my $self = shift;
-
-    # Create a callback closure that is invoked for each incoming request;
-    # the $self above is bound into the closure.
-    sub {
-
-        $self->stdio_handle(*STDIN) unless $self->stdio_handle;
-
- # Default to unencoded, raw data out.
- # if you're sending utf8 and latin1 data mixed, you may need to override this
-        binmode STDIN,  ':raw';
-        binmode STDOUT, ':raw';
-
-        # The ternary operator below is to protect against a crash caused by IE
-        # Ported from Catalyst::Engine::HTTP (Originally by Jasper Krogh and Peter Edwards)
-        # ( http://dev.catalyst.perl.org/changeset/5195, 5221 )
-
-        my $remote_sockaddr = getpeername( $self->stdio_handle );
-        my $family = $remote_sockaddr ? sockaddr_family($remote_sockaddr) : AF_INET;
-
-        my ( $iport, $iaddr ) = $remote_sockaddr
-                                ? ( ($family == AF_INET6) ? sockaddr_in6($remote_sockaddr)
-                                                          : sockaddr_in($remote_sockaddr) )
-                                : (undef,undef);
-
-        my $loopback = ($family == AF_INET6) ? "::1" : "127.0.0.1";
-        my $peeraddr = $loopback;
-        if ($iaddr) {
-            my ($host_err,$addr, undef) = Socket::getnameinfo($remote_sockaddr,Socket::NI_NUMERICHOST);
-            warn ($host_err) if $host_err;
-            $peeraddr = $addr || $loopback;
-        }
-
-        my ( $method, $request_uri, $proto ) = $self->parse_request;
-
-        unless ($self->valid_http_method($method) ) {
-            $self->bad_request;
-            return;
-        }
-
-        $proto ||= "HTTP/0.9";
-
-        my ( $file, $query_string )
-            = ( $request_uri =~ /([^?]*)(?:\?(.*))?/s );    # split at ?
-
-        $self->setup(
-            method       => $method,
-            protocol     => $proto,
-            query_string => ( defined($query_string) ? $query_string : '' ),
-            request_uri  => $request_uri,
-            path         => $file,
-            localname    => $self->host,
-            localport    => $self->port,
-            peername     => $peeraddr,
-            peeraddr     => $peeraddr,
-            peerport     => $iport,
-        );
-
-        # HTTP/0.9 didn't have any headers (I think)
-        if ( $proto =~ m{HTTP/(\d(\.\d)?)$} and $1 >= 1 ) {
-            my $headers = $self->parse_headers
-                or do { $self->bad_request; return };
-
-            $self->headers($headers);
-        }
-
-        $self->post_setup_hook if $self->can("post_setup_hook");
-
-        $self->handler;
-    }
-}
-
-sub root {
-    my $self = shift;
-    my $port = $self->port;
-    my $hostname = $self->host;
-
-    return "http://$hostname:$port";
-}
-
-sub stop {
-    my $signal = ($OSNAME eq 'MSWin32') ? 9 : 15;
-    if ($pid) {
-        kill($signal, $pid) unless $EXCEPTIONS_BEING_CAUGHT;
-        waitpid($pid, 0);
-        undef $pid;
-    }
-
-    return;
-}
-
-1;
+# For backward compatibility, allow creating instance directly
+def create_server(**kwargs) -> TestServer:
+    """Create a new test server instance"""
+    return TestServer(**kwargs)

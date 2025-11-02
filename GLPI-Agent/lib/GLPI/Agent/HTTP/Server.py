@@ -14,10 +14,14 @@ import hashlib
 import threading
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from http import HTTPStatus
 from urllib.parse import urlparse, unquote
 from typing import Optional, Dict, List, Any, Tuple
 import glob
 import re
+import struct
+from io import BytesIO
+from collections import namedtuple
 
 try:
     from jinja2 import Template
@@ -53,6 +57,144 @@ MAX_KEEP_ALIVE = 8
 # Log prefix
 LOG_PREFIX = "[http server] "
 
+# HTTP Request structure
+HTTPRequest = namedtuple('HTTPRequest', [
+    'method', 'path', 'query', 'version', 'headers', 'body', 'client_ip'
+])
+
+
+class HTTPRequestHandler(BaseHTTPRequestHandler):
+    """HTTP Request Handler for GLPI Agent Server"""
+    
+    def __init__(self, *args, server=None, **kwargs):
+        """Initialize with server reference"""
+        self.server_instance = server
+        super().__init__(*args, **kwargs)
+    
+    def log_message(self, format, *args):
+        """Log message using server's logger"""
+        if self.server_instance and hasattr(self.server_instance, 'logger'):
+            message = format % args
+            self.server_instance.logger.debug(f"{LOG_PREFIX}{message}")
+    
+    def parse_custom_request(self):
+        """Parse HTTP request and return HTTPRequest object"""
+        try:
+            # Parse request line
+            line = self.rfile.readline(self.server.max_request_size if hasattr(self.server, 'max_request_size') else 65537)
+            if not line:
+                return None
+            
+            line = line.rstrip(b'\r\n')
+            request_line = line.decode('latin-1', errors='replace')
+            
+            parts = request_line.split(None, 2)
+            if len(parts) < 2:
+                return None
+            
+            method = parts[0]
+            path_part = parts[1]
+            version = parts[2] if len(parts) > 2 else 'HTTP/1.0'
+            
+            # Parse path and query
+            parsed = urlparse(path_part)
+            path = unquote(parsed.path)
+            query = parsed.query
+            
+            # Parse headers
+            headers = {}
+            while True:
+                line = self.rfile.readline(65537).rstrip(b'\r\n')
+                if not line:
+                    break
+                
+                header_line = line.decode('latin-1', errors='replace')
+                if ':' in header_line:
+                    key, value = header_line.split(':', 1)
+                    headers[key.strip().lower()] = value.strip()
+            
+            # Read body if Content-Length is specified
+            body = b''
+            if 'content-length' in headers:
+                try:
+                    content_length = int(headers['content-length'])
+                    if content_length > 0:
+                        body = self.rfile.read(content_length)
+                except (ValueError, OSError):
+                    pass
+            
+            # Get client IP
+            client_ip = self.client_address[0] if self.client_address else 'unknown'
+            
+            return HTTPRequest(
+                method=method,
+                path=path,
+                query=query,
+                version=version,
+                headers=headers,
+                body=body,
+                client_ip=client_ip
+            )
+        except Exception as e:
+            if self.server_instance and hasattr(self.server_instance, 'logger'):
+                self.server_instance.logger.error(f"{LOG_PREFIX}Error parsing request: {e}")
+            return None
+    
+    def send_response_data(self, status_code: int, content: bytes = b'', 
+                          content_type: str = 'text/html; charset=utf-8',
+                          headers: Optional[Dict[str, str]] = None):
+        """Send HTTP response"""
+        status_text = HTTPStatus(status_code).phrase
+        
+        # Build response
+        response_headers = {
+            'Content-Type': content_type,
+            'Content-Length': str(len(content)),
+            'Connection': 'close',
+        }
+        
+        if headers:
+            response_headers.update(headers)
+        
+        # Send status line
+        self.wfile.write(f"HTTP/1.1 {status_code} {status_text}\r\n".encode('latin-1'))
+        
+        # Send headers
+        for key, value in response_headers.items():
+            self.wfile.write(f"{key}: {value}\r\n".encode('latin-1'))
+        
+        self.wfile.write(b'\r\n')
+        
+        # Send body
+        if content:
+            self.wfile.write(content)
+        
+        self.wfile.flush()
+    
+    def do_GET(self):
+        """Handle GET request"""
+        self.handle_http_request()
+    
+    def do_POST(self):
+        """Handle POST request"""
+        self.handle_http_request()
+    
+    def handle_http_request(self):
+        """Handle HTTP request"""
+        request = self.parse_custom_request()
+        if not request:
+            self.send_response_data(400, b'Bad Request')
+            return
+        
+        # Process request through server
+        if self.server_instance:
+            status_code, content, content_type, headers = self.server_instance._process_request(
+                request, request.client_ip
+            )
+            self.send_response_data(status_code, content, content_type, headers)
+        else:
+            self.send_response_data(500, b'Internal Server Error')
+
 
 class Server:
     """
@@ -81,12 +223,16 @@ class Server:
         self.ip = params.get('ip')
         self.port = params.get('port', 62354)
         self.listeners: Dict[int, Dict[str, Any]] = {}
-        self.listener = None
+        self.listener: Optional[socket.socket] = None
+        self._server: Optional[HTTPServer] = None
+        self._servers: Dict[int, HTTPServer] = {}
         self._plugins: List[Any] = []
         self._ssl = None
         self._poller = None
         self._pollers: Dict[int, Any] = {}
         self._timer_event = None
+        self._cached_root_content: Optional[bytes] = None
+        self._cached_deploy_content: Optional[bytes] = None
         
         # Trust-related attributes
         self.trust: Dict[str, List[Any]] = {}
@@ -279,42 +425,86 @@ class Server:
         
         return False
 
-    def _handle(self, client, request, client_ip: str, max_keepalive: int):
+    def _process_request(self, request: HTTPRequest, client_ip: str) -> Tuple[int, bytes, str, Dict[str, str]]:
         """
-        Handle an HTTP request.
+        Process HTTP request and return response.
         
         Args:
-            client: Client connection
-            request: HTTP request object
+            request: HTTPRequest object
             client_ip: Client IP address
-            max_keepalive: Maximum keep-alive requests remaining
+            
+        Returns:
+            Tuple of (status_code, content, content_type, headers)
         """
-        # This is a simplified handler - in practice, this would be
-        # implemented as part of the HTTPRequestHandler
-        pass
-
-    def _handle_plugins(self, client, request, client_ip: str, 
-                       plugins: List[Any], max_keepalive: int):
-        """
-        Handle request through plugins.
+        path = request.path
+        headers = {}
         
-        Args:
-            client: Client connection
-            request: HTTP request object
-            client_ip: Client IP address
-            plugins: List of plugins to try
-            max_keepalive: Maximum keep-alive requests remaining
-        """
-        # Simplified plugin handler
-        pass
+        # Try plugins first
+        for plugin in self._plugins:
+            if hasattr(plugin, 'disabled') and plugin.disabled():
+                continue
+            
+            if hasattr(plugin, 'handle'):
+                try:
+                    result = plugin.handle(request, client_ip)
+                    if result is not None:
+                        status_code, content, content_type = result if isinstance(result, tuple) else (result, b'', 'text/html')
+                        return (status_code, content if isinstance(content, bytes) else str(content).encode('utf-8'), 
+                               content_type or 'text/html', headers)
+                except Exception as e:
+                    self.logger.debug(f"{LOG_PREFIX}Plugin {plugin.name() if hasattr(plugin, 'name') else 'unknown'} error: {e}")
+                    continue
+        
+        # Handle standard paths
+        if path == '/' or path == '':
+            status_code = self._handle_root(request, client_ip)
+            if status_code == 200 and self._cached_root_content:
+                return (200, self._cached_root_content, 'text/html', headers)
+            return (status_code, self._get_error_message(status_code), 'text/html', headers)
+        
+        elif path.startswith('/deploy/'):
+            sha512 = path[8:]  # Remove '/deploy/' prefix
+            status_code = self._handle_deploy(request, client_ip, sha512)
+            if status_code == 200 and self._cached_deploy_content:
+                # Determine content type from file extension
+                content_type = 'application/octet-stream'
+                if sha512.endswith(('.json', '.xml', '.txt')):
+                    content_type = 'text/plain'
+                elif sha512.endswith('.html'):
+                    content_type = 'text/html'
+                return (200, self._cached_deploy_content, content_type, headers)
+            return (status_code, self._get_error_message(status_code), 'text/html', headers)
+        
+        elif path == '/now':
+            status_code = self._handle_now(request, client_ip)
+            message = b'OK' if status_code == 200 else b'Access denied'
+            return (status_code, message, 'text/plain', headers)
+        
+        elif path == '/status':
+            status_code = self._handle_status(request, client_ip)
+            status_text = self.agent.getStatus() if self.agent and hasattr(self.agent, 'getStatus') else 'unknown'
+            return (status_code, status_text.encode('utf-8'), 'text/plain', headers)
+        
+        else:
+            return (404, self._get_error_message(404), 'text/html', headers)
+    
+    def _get_error_message(self, status_code: int) -> bytes:
+        """Get error message for status code"""
+        messages = {
+            400: b'Bad Request',
+            403: b'Forbidden',
+            404: b'Not Found',
+            500: b'Internal Server Error',
+            501: b'Not Implemented',
+        }
+        return messages.get(status_code, b'Error')
 
-    def _handle_root(self, client, request, client_ip: str) -> int:
+    def _handle_root(self, request: HTTPRequest, client_ip: str) -> int:
         """
         Handle root path request (/).
         
         Args:
-            client: Client connection
-            request: HTTP request object
+            request: HTTPRequest object
             client_ip: Client IP address
             
         Returns:
@@ -372,28 +562,31 @@ class Server:
         # Render template and send response
         try:
             html_content = template.render(**context)
-            # Send response (implementation depends on request handler)
+            # Store rendered content for response
+            self._cached_root_content = html_content.encode('utf-8')
             return 200
         except Exception as e:
             self.logger.error(f"{LOG_PREFIX}Template rendering failed: {e}")
             return 500
 
-    def _handle_deploy(self, client, request, client_ip: str, 
+    def _handle_deploy(self, request: HTTPRequest, client_ip: str, 
                       sha512: str) -> int:
         """
         Handle deploy file request.
         
         Args:
-            client: Client connection
-            request: HTTP request object
+            request: HTTPRequest object
             client_ip: Client IP address
             sha512: SHA512 hash of requested file
             
         Returns:
             HTTP status code
         """
-        # Parse SHA512 to get file path
-        match = re.match(r'^(.)(.)(.\{6\})', sha512)
+        # Parse SHA512 to get file path (first char, second char, next 6 chars)
+        if len(sha512) < 8:
+            return 404
+        
+        match = re.match(r'^(.)(.)(.{6})', sha512)
         if not match:
             return 404
         
@@ -438,18 +631,23 @@ class Server:
                     break
         
         if path:
-            # Send file (implementation depends on request handler)
-            return 200
+            # Store file path for response
+            try:
+                with open(path, 'rb') as f:
+                    self._cached_deploy_content = f.read()
+                return 200
+            except Exception as e:
+                self.logger.error(f"{LOG_PREFIX}Error reading deploy file: {e}")
+                return 500
         else:
             return 404
 
-    def _handle_now(self, client, request, client_ip: str) -> int:
+    def _handle_now(self, request: HTTPRequest, client_ip: str) -> int:
         """
         Handle /now request to trigger immediate run.
         
         Args:
-            client: Client connection
-            request: HTTP request object
+            request: HTTPRequest object
             client_ip: Client IP address
             
         Returns:
@@ -483,7 +681,10 @@ class Server:
                 targets = list(self.agent.getTargets())
         
         if targets:
-            # Process the request
+            # Reschedule next contact for targets
+            for target in targets:
+                if hasattr(target, 'setNextRunDate'):
+                    target.setNextRunDate(time.time())
             trace = "rescheduling next contact for all targets right now"
         else:
             code = 403
@@ -495,20 +696,18 @@ class Server:
         
         return code
 
-    def _handle_status(self, client, request, client_ip: str) -> int:
+    def _handle_status(self, request: HTTPRequest, client_ip: str) -> int:
         """
         Handle /status request.
         
         Args:
-            client: Client connection
-            request: HTTP request object
+            request: HTTPRequest object
             client_ip: Client IP address
             
         Returns:
             HTTP status code
         """
-        status = self.agent.getStatus() if self.agent else 'unknown'
-        # Send response (implementation depends on request handler)
+        # Status will be returned in response content
         return 200
 
     def init(self) -> bool:
@@ -519,14 +718,23 @@ class Server:
             True on success, False on failure
         """
         try:
-            # Create main listener
-            # Note: This is simplified - actual implementation would use
-            # a proper HTTP server implementation
-            self.listener = True  # Placeholder
+            # Create HTTP request handler factory
+            def handler_factory(*args, **kwargs):
+                return HTTPRequestHandler(*args, server=self, **kwargs)
             
-            self.logger.info(
-                f"{LOG_PREFIX}HTTPD service started on port {self.port}"
-            )
+            # Create main HTTP server
+            bind_ip = self.ip if self.ip else ''
+            try:
+                self._server = HTTPServer((bind_ip, self.port), handler_factory)
+                self._server.timeout = 1.0  # Non-blocking timeout
+                self.listener = self._server.socket
+                
+                self.logger.info(
+                    f"{LOG_PREFIX}HTTPD service started on {bind_ip or 'all interfaces'}:{self.port}"
+                )
+            except OSError as e:
+                self.logger.error(f"{LOG_PREFIX}Failed to bind to {bind_ip}:{self.port}: {e}")
+                return False
             
             # Initialize plugins and set up additional listeners
             plugins = {}
@@ -563,13 +771,21 @@ class Server:
                     port = plugin.port()
                     if port and port != self.port:
                         if port not in self.listeners:
-                            self.listeners[port] = {
-                                'listener': True,  # Placeholder
-                                'plugins': [plugin],
-                            }
-                            self.logger.info(
-                                f"{LOG_PREFIX}HTTPD {plugin.name()} Server plugin started on port {port}"
-                            )
+                            try:
+                                # Create additional HTTP server for this port
+                                additional_server = HTTPServer((bind_ip, port), handler_factory)
+                                additional_server.timeout = 1.0
+                                self._servers[port] = additional_server
+                                
+                                self.listeners[port] = {
+                                    'listener': additional_server.socket,
+                                    'plugins': [plugin],
+                                }
+                                self.logger.info(
+                                    f"{LOG_PREFIX}HTTPD {plugin.name() if hasattr(plugin, 'name') else 'plugin'} Server plugin started on port {port}"
+                                )
+                            except OSError as e:
+                                self.logger.error(f"{LOG_PREFIX}Failed to start plugin on port {port}: {e}")
                         else:
                             self.listeners[port]['plugins'].append(plugin)
                         
@@ -671,13 +887,26 @@ class Server:
             return
         
         # Stop additional listeners
-        for port, listener_info in self.listeners.items():
-            # Close listener (implementation specific)
-            pass
+        for port, listener_info in list(self.listeners.items()):
+            if port in self._servers:
+                try:
+                    self._servers[port].shutdown()
+                    self._servers[port].server_close()
+                except Exception:
+                    pass
+                del self._servers[port]
         
         self.listeners = {}
         
-        # Stop main listener (implementation specific)
+        # Stop main listener
+        if self._server:
+            try:
+                self._server.shutdown()
+                self._server.server_close()
+            except Exception:
+                pass
+            self._server = None
+        
         self.listener = None
         
         self.logger.debug(f"{LOG_PREFIX}HTTPD service stopped")
@@ -713,13 +942,44 @@ class Server:
             else:
                 self._timer_event = time.time() + 60
         
-        # Handle requests (simplified - actual implementation would
-        # use proper socket handling with select/poll)
+        # Handle requests using select() for non-blocking I/O
         got_connection = 0
         
-        # This is a placeholder for the actual request handling
-        # In practice, this would use select() or poll() to check
-        # for incoming connections on all listeners
+        # Collect all listening sockets
+        sockets = []
+        if self.listener:
+            sockets.append(self.listener)
+        
+        for listener_info in self.listeners.values():
+            if 'listener' in listener_info and listener_info['listener']:
+                sockets.append(listener_info['listener'])
+        
+        if not sockets:
+            return 0
+        
+        # Use select to check for ready sockets (non-blocking)
+        try:
+            ready_sockets, _, _ = select.select(sockets, [], [], 0.1)
+        except (OSError, ValueError):
+            # Socket may have been closed
+            return 0
+        
+        # Handle requests on ready sockets
+        for sock in ready_sockets:
+            try:
+                # Handle main server
+                if sock == self.listener and self._server:
+                    self._server.handle_request()
+                    got_connection += 1
+                # Handle additional servers
+                else:
+                    for port, server in self._servers.items():
+                        if sock == server.socket:
+                            server.handle_request()
+                            got_connection += 1
+                            break
+            except Exception as e:
+                self.logger.debug(f"{LOG_PREFIX}Error handling request: {e}")
         
         return got_connection
 
