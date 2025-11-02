@@ -1,122 +1,115 @@
-package GLPI::Agent::Task::Inventory::Virtualization::Parallels;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Virtualization Parallels - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, Dict, List, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_all_lines
+from GLPI.Agent.Tools.Virtualization import (
+    STATUS_RUNNING, STATUS_BLOCKED, STATUS_PAUSED,
+    STATUS_CRASHED, STATUS_DYING, STATUS_OFF,
+)
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Virtualization;
 
-sub isEnabled {
-    return canRun('prlctl');
-}
+class Parallels(InventoryModule):
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        return can_run('prlctl')
 
-sub doInventory {
-    my (%params) = @_;
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        inventory = params.get('inventory')
+        logger = params.get('logger')
 
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
+        if not params.get('scan_homedirs'):
+            if logger:
+                logger.warning(
+                    "'scan-homedirs' configuration parameter disabled, ignoring parallels virtual machines in user directories"
+                )
+            return
 
-    if (!$params{scan_homedirs}) {
-        $logger->warning(
-            "'scan-homedirs' configuration parameter disabled, " .
-            "ignoring parallels virtual machines in user directories"
-        );
-        return;
-    }
+        # Enumerate macOS users by scanning /Users/* (parallels is macOS-only)
+        lines = get_all_lines(command="ls -1 /Users") or []
+        for user in lines:
+            user = user.strip()
+            if not user or user.lower() == 'shared' or user.startswith('.') or ' ' in user or "'" in user:
+                continue
 
-    foreach my $user ( Glob("/Users/*") ) {
-        $user =~ s/.*\///; # Just keep the login
-        next if $user =~ /Shared/i;
-        next if $user =~ /^\./i; # skip hidden directory
-        next if $user =~ /\ /;   # skip directory containing space
-        next if $user =~ /'/;    # skip directory containing quote
+            for machine in Parallels._parse_prlctl_a(
+                logger=logger,
+                command=f"su '{user}' -c 'prlctl list -a'",
+            ):
+                uuid = machine.get('UUID', '')
+                uuid = re.sub(r"[^A-Za-z0-9\.\s_-]", "", uuid)
 
-        foreach my $machine (_parsePrlctlA(
-                logger  => $logger,
-                command => "su '$user' -c 'prlctl list -a'"
-        )) {
+                mem, vcpu = Parallels._parse_prlctl_i(
+                    logger=logger,
+                    command=f"su '{user}' -c 'prlctl list -i {uuid}'",
+                )
+                machine['MEMORY'] = mem
+                machine['VCPU'] = vcpu
 
-            my $uuid = $machine->{UUID};
-            # Avoid security risk. Should never appends
-            $uuid =~ s/[^A-Za-z0-9\.\s_-]//g;
+                if inventory:
+                    inventory.add_entry(section='VIRTUALMACHINES', entry=machine)
 
-            ($machine->{MEMORY}, $machine->{VCPU}) =
-                _parsePrlctlI(
-                    logger  => $logger,
-                    command => "su '$user' -c 'prlctl list -i $uuid'"
-                );
+    @staticmethod
+    def _parse_prlctl_a(**params) -> List[Dict[str, Any]]:
+        lines = get_all_lines(**params) or []
+        if not lines:
+            return []
 
-            $inventory->addEntry(
-                section => 'VIRTUALMACHINES', entry => $machine
-            );
+        status_list = {
+            'running': STATUS_RUNNING,
+            'blocked': STATUS_BLOCKED,
+            'paused': STATUS_PAUSED,
+            'suspended': STATUS_PAUSED,
+            'crashed': STATUS_CRASHED,
+            'dying': STATUS_DYING,
+            'stopped': STATUS_OFF,
         }
-    }
-}
 
-sub _parsePrlctlA {
-    my (%params) = @_;
+        # drop header line
+        lines = lines[1:]
 
-    my @lines = getAllLines(%params)
-        or return;
+        machines: List[Dict[str, Any]] = []
+        for line in lines:
+            info = re.split(r"\s+", line, maxsplit=3)
+            if len(info) < 4:
+                continue
+            uuid, status_raw, _, name = info
+            uuid = re.sub(r"^{(.*)}$", r"\1", uuid)
+            # Avoid shell injection strings
+            if re.search(r"(;\||&)", uuid):
+                continue
+            machines.append({
+                'NAME': name,
+                'UUID': uuid,
+                'STATUS': status_list.get(status_raw, STATUS_OFF),
+                'SUBSYSTEM': 'Parallels',
+                'VMTYPE': 'parallels',
+            })
+        return machines
 
-    my %status_list = (
-        'running'   => STATUS_RUNNING,
-        'blocked'   => STATUS_BLOCKED,
-        'paused'    => STATUS_PAUSED,
-        'suspended' => STATUS_PAUSED,
-        'crashed'   => STATUS_CRASHED,
-        'dying'     => STATUS_DYING,
-        'stopped'   => STATUS_OFF
-    );
+    @staticmethod
+    def _parse_prlctl_i(**params) -> (Optional[int], Optional[int]):
+        lines = get_all_lines(**params) or []
+        mem = None
+        cpus = None
+        for line in lines:
+            m_mem = re.match(r"^\s\smemory\s(.*)Mb", line)
+            if m_mem:
+                try:
+                    mem = int(m_mem.group(1))
+                except ValueError:
+                    pass
+            m_cpu = re.match(r"^\s\scpu\s(\d{1,2})", line)
+            if m_cpu:
+                try:
+                    cpus = int(m_cpu.group(1))
+                except ValueError:
+                    pass
+        return mem, cpus
 
-
-    # get headers line first
-    shift(@lines);
-
-    my @machines;
-    foreach my $line (@lines) {
-        my @info = split(/\s+/, $line, 4);
-        my $uuid   = $info[0];
-        my $status = $status_list{$info[1]};
-        my $name   = $info[3];
-
-
-        $uuid =~s/{(.*)}/$1/;
-
-        # Avoid security risk. Should never appends
-        next if $uuid =~ /(;\||&)/;
-
-        push @machines, {
-            NAME      => $name,
-            UUID      => $uuid,
-            STATUS    => $status,
-            SUBSYSTEM => "Parallels",
-            VMTYPE    => "parallels",
-        };
-    }
-
-    return @machines;
-}
-
-sub _parsePrlctlI {
-    my (%params) = @_;
-
-    my @lines = getAllLines(%params)
-        or return;
-
-    my ($mem, $cpus);
-    foreach my $line (@lines) {
-        if ($line =~ m/^\s\smemory\s(.*)Mb/) {
-            $mem = $1;
-        }
-        if ($line =~ m/^\s\scpu\s(\d{1,2})/) {
-            $cpus = $1;
-        }
-    }
-
-    return ($mem, $cpus);
-}
-
-1;

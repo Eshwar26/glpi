@@ -1,48 +1,53 @@
-package GLPI::Agent::Task::Inventory::Linux::ARM::CPU;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Linux ARM CPU - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any, List, Dict
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_read
+from GLPI.Agent.Tools.Linux import get_cpus_from_proc
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Linux;
 
-use constant    category    => "cpu";
-
-sub isEnabled {
-    return canRead('/proc/cpuinfo');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    foreach my $cpu (_getCPUsFromProc(
-        logger  => $logger,
-        file    => '/proc/cpuinfo'
-    )) {
-        $inventory->addEntry(
-            section => 'CPUS',
-            entry   => $cpu
-        );
-    }
-}
-
-sub _getCPUsFromProc {
-    my @cpus;
-
-    # https://github.com/joyent/libuv/issues/812
-    foreach my $cpu (getCPUsFromProc(@_)) {
-        push @cpus, {
-            ARCH  => $cpu->{'cpu architecture'} && $cpu->{'cpu architecture'} =~ /^(\d+)/ && int($1) >= 8 ? 'aarch64' : 'arm',
-            NAME  => $cpu->{'model name'} || $cpu->{processor}
-        };
-    }
-
-    return @cpus;
-}
-
-1;
+class CPU(InventoryModule):
+    """ARM CPU detection module."""
+    
+    category = "cpu"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_read('/proc/cpuinfo')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        for cpu in CPU._get_cpus_from_proc(logger=logger, file='/proc/cpuinfo'):
+            if inventory:
+                inventory.add_entry(section='CPUS', entry=cpu)
+    
+    @staticmethod
+    def _get_cpus_from_proc(**params) -> List[Dict[str, Any]]:
+        """Parse ARM CPU information from /proc/cpuinfo."""
+        cpus = []
+        
+        # https://github.com/joyent/libuv/issues/812
+        for cpu in get_cpus_from_proc(**params):
+            arch = 'arm'
+            cpu_arch = cpu.get('cpu architecture', '')
+            if cpu_arch:
+                import re
+                match = re.match(r'^(\d+)', cpu_arch)
+                if match and int(match.group(1)) >= 8:
+                    arch = 'aarch64'
+            
+            cpus.append({
+                'ARCH': arch,
+                'NAME': cpu.get('model name') or cpu.get('processor')
+            })
+        
+        return cpus

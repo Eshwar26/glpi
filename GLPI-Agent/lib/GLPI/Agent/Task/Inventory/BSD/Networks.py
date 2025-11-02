@@ -1,83 +1,89 @@
-package GLPI::Agent::Task::Inventory::BSD::Networks;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory BSD Networks - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, List, Dict
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run
+from GLPI.Agent.Tools.Network import is_same_network, get_subnet_address
+from GLPI.Agent.Tools.Unix import get_routing_table
+from GLPI.Agent.Tools.BSD import get_interfaces_from_ifconfig, get_ip_dhcp
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Network;
-use GLPI::Agent::Tools::Unix;
-use GLPI::Agent::Tools::BSD;
 
-use constant    category    => "network";
-
-sub isEnabled {
-    return canRun('ifconfig');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $routes = getRoutingTable(logger => $logger);
-    my $default = $routes->{'0.0.0.0'} // $routes->{'default'};
-
-    my @interfaces = _getInterfaces(logger => $logger);
-    foreach my $interface (@interfaces) {
-        # if the default gateway address and the interface address belongs to
-        # the same network, that's the gateway for this network
-        $interface->{IPGATEWAY} = $default if isSameNetwork(
-            $default, $interface->{IPADDRESS}, $interface->{IPMASK}
-        );
-
-        $inventory->addEntry(
-            section => 'NETWORKS',
-            entry   => $interface
-        );
-    }
-
-    $inventory->setHardware({
-        DEFAULTGATEWAY => $default
-    });
-}
-
-sub _getInterfaces {
-    my (%params) = @_;
-
-    my @interfaces = getInterfacesFromIfconfig(
-        logger => $params{logger}
-    );
-
-    foreach my $interface (@interfaces) {
-        $interface->{IPSUBNET} = getSubnetAddress(
-            $interface->{IPADDRESS},
-            $interface->{IPMASK}
-        );
-
-        $interface->{IPDHCP} = getIpDhcp(
-            $params{logger},
-            $interface->{DESCRIPTION}
-        );
-
-        if ($interface->{DESCRIPTION} =~ m/^(lo|vboxnet|vmnet|vtnet|sit|tun|pflog|pfsync|enc|strip|plip|sl|ppp|faith)/) {
-            $interface->{VIRTUALDEV} = 1;
-
-            if ($interface->{DESCRIPTION} =~ m/^lo/) {
-                $interface->{TYPE} = 'loopback';
-            }
-
-            if ($interface->{DESCRIPTION} =~ m/^ppp/) {
-                $interface->{TYPE} = 'dialup';
-            }
-        } else {
-            $interface->{VIRTUALDEV} = 0;
-        }
-    }
-
-    return @interfaces;
-}
-
-1;
+class Networks(InventoryModule):
+    """BSD Networks inventory module."""
+    
+    @staticmethod
+    def category() -> str:
+        """Return the inventory category."""
+        return "network"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('ifconfig')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        routes = get_routing_table(logger=logger)
+        default = routes.get('0.0.0.0') or routes.get('default')
+        
+        interfaces = Networks._get_interfaces(logger=logger)
+        for interface in interfaces:
+            # if the default gateway address and the interface address belongs to
+            # the same network, that's the gateway for this network
+            if default and is_same_network(
+                default,
+                interface.get('IPADDRESS'),
+                interface.get('IPMASK')
+            ):
+                interface['IPGATEWAY'] = default
+            
+            if inventory:
+                inventory.add_entry(
+                    section='NETWORKS',
+                    entry=interface
+                )
+        
+        if inventory and default:
+            inventory.set_hardware({
+                'DEFAULTGATEWAY': default
+            })
+    
+    @staticmethod
+    def _get_interfaces(**params) -> List[Dict[str, Any]]:
+        """Get network interfaces information."""
+        logger = params.get('logger')
+        
+        interfaces = get_interfaces_from_ifconfig(logger=logger)
+        
+        for interface in interfaces:
+            ip_address = interface.get('IPADDRESS')
+            ip_mask = interface.get('IPMASK')
+            
+            if ip_address and ip_mask:
+                interface['IPSUBNET'] = get_subnet_address(ip_address, ip_mask)
+            
+            description = interface.get('DESCRIPTION', '')
+            interface['IPDHCP'] = get_ip_dhcp(logger, description)
+            
+            # Check for virtual devices
+            if re.match(r'^(lo|vboxnet|vmnet|vtnet|sit|tun|pflog|pfsync|enc|strip|plip|sl|ppp|faith)', description):
+                interface['VIRTUALDEV'] = 1
+                
+                if re.match(r'^lo', description):
+                    interface['TYPE'] = 'loopback'
+                
+                if re.match(r'^ppp', description):
+                    interface['TYPE'] = 'dialup'
+            else:
+                interface['VIRTUALDEV'] = 0
+        
+        return interfaces

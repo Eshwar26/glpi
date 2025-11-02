@@ -1,49 +1,36 @@
-package GLPI::Agent::SOAP::WsMan::Body;
+from typing import Dict
 
-use strict;
-use warnings;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
+# from glpi.agent.soap.wsman.fault import Fault
+# from glpi.agent.soap.wsman.enumerateresponse import EnumerateResponse
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    Body;
+class Body(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::Body
+    WSMan Body node handling.
+    """
+    xmlns = 's'
 
-use parent
-    'Node';
+    @staticmethod
+    def support() -> Dict[str, str]:
+        return {
+            'IdentifyResponse': "wsmid:IdentifyResponse",
+            'Fault': "s:Fault",
+            'EnumerateResponse': "n:EnumerateResponse",
+            'PullResponse': "n:PullResponse",
+            'Shell': "rsp:Shell",
+            'ReceiveResponse': "rsp:ReceiveResponse",
+            'ResourceCreated': "x:ResourceCreated",
+            'CommandResponse': "rsp:CommandResponse",
+        }
 
-use constant    xmlns   => 's';
+    def fault(self):
+        fault = self.get('Fault')
+        return fault or Fault()
 
-use GLPI::Agent::SOAP::WsMan::Fault;
-use GLPI::Agent::SOAP::WsMan::EnumerateResponse;
-
-sub support {
-    return {
-        IdentifyResponse    => "wsmid:IdentifyResponse",
-        Fault               => "s:Fault",
-        EnumerateResponse   => "n:EnumerateResponse",
-        PullResponse        => "n:PullResponse",
-        Shell               => "rsp:Shell",
-        ReceiveResponse     => "rsp:ReceiveResponse",
-        ResourceCreated     => "x:ResourceCreated",
-        CommandResponse     => "rsp:CommandResponse",
-    };
-}
-
-sub fault {
-    my ($self) = @_;
-
-    my ($fault) = $self->get('Fault');
-
-    return $fault // Fault->new();
-}
-
-sub enumeration {
-    my ($self, $ispull) = @_;
-
-    my ($enum) = $self->get($ispull ? 'PullResponse' : 'EnumerateResponse');
-
-    return $enum // EnumerateResponse->new();
-}
-
-1;
+    def enumeration(self, ispull: bool = False):
+        key = 'PullResponse' if ispull else 'EnumerateResponse'
+        enum = self.get(key)
+        return enum or EnumerateResponse()

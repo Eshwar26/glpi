@@ -1,62 +1,67 @@
-package GLPI::Agent::Task::Inventory::Generic::Dmidecode::Slots;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Generic Dmidecode Slots - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any, Dict, List, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools.Generic import get_dmidecode_infos
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Generic;
 
-use constant    category    => "slot";
-
-my %status = (
-    'Unknown'   => undef,
-    'In Use'    => 'used',
-    'Available' => 'free'
-);
-
-sub isEnabled {
-    return 1;
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $slots = _getSlots(logger => $logger);
-
-    return unless $slots;
-
-    foreach my $slot (@$slots) {
-        $inventory->addEntry(
-            section => 'SLOTS',
-            entry   => $slot
-        );
+class Slots(InventoryModule):
+    """Dmidecode slots inventory module."""
+    
+    STATUS_MAP = {
+        'Unknown': None,
+        'In Use': 'used',
+        'Available': 'free'
     }
-}
-
-sub _getSlots {
-    my $infos = getDmidecodeInfos(@_);
-
-    return unless $infos->{9};
-
-    my $slots;
-    foreach my $info (@{$infos->{9}}) {
-        my $slot = {
-            DESCRIPTION => $info->{'Type'},
-            DESIGNATION => $info->{'ID'},
-            NAME        => $info->{'Designation'},
-            STATUS      => $info->{'Current Usage'} ?
-                $status{$info->{'Current Usage'}} : undef,
-        };
-
-        push @$slots, $slot;
-    }
-
-    return $slots;
-}
-
-1;
+    
+    @staticmethod
+    def category() -> str:
+        """Return the inventory category."""
+        return "slot"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return True
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        slots = Slots._get_slots(logger=logger)
+        
+        if not slots:
+            return
+        
+        for slot in slots:
+            if inventory:
+                inventory.add_entry(
+                    section='SLOTS',
+                    entry=slot
+                )
+    
+    @staticmethod
+    def _get_slots(**params) -> Optional[List[Dict[str, Optional[str]]]]:
+        """Get slots from dmidecode."""
+        infos = get_dmidecode_infos(**params)
+        
+        if not infos or not infos.get(9):
+            return None
+        
+        slots = []
+        for info in infos[9]:
+            slot = {
+                'DESCRIPTION': info.get('Type'),
+                'DESIGNATION': info.get('ID'),
+                'NAME': info.get('Designation'),
+                'STATUS': Slots.STATUS_MAP.get(info.get('Current Usage')) if info.get('Current Usage') else None,
+            }
+            slots.append(slot)
+        
+        return slots

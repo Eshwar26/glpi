@@ -1,98 +1,104 @@
-package GLPI::Agent::Task::Inventory::Generic::Remote_Mgmt::LiteManager;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Generic Remote_Mgmt LiteManager - Python Implementation
+"""
 
-use strict;
-use warnings;
+import platform
+from typing import Any, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import first
 
-use GLPI::Agent::Tools;
 
-sub isEnabled {
-    return 0 unless OSNAME eq 'MSWin32';
-
-    GLPI::Agent::Tools::Win32->use();
-
-    my $key;
-    first {
-        $key = GLPI::Agent::Tools::Win32::getRegistryKey(
-            path        => $_,
-            # Important for remote inventory optimization
-            required    => [ 'ID (read only)' ],
-            maxdepth    => 3,
-        ) && $key && keys(%{$key})
-    } qw(
-        HKEY_LOCAL_MACHINE/SYSTEM/LiteManager
-        HKEY_LOCAL_MACHINE/SOFTWARE/LiteManager
-    );
-    return $key && keys(%{$key});
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $liteManagerID = _getID( logger => $logger );
-
-    if ($liteManagerID) {
-        $logger->debug('Found LiteManagerID : ' . $liteManagerID) if ($logger);
-
-        $inventory->addEntry(
-            section => 'REMOTE_MGMT',
-            entry   => {
-                ID   => $liteManagerID,
-                TYPE => 'litemanager'
-            }
-        );
-    } else {
-        $logger->debug('LiteManagerID not found') if ($logger);
-    }
-}
-
-sub _getID {
-    my (%params) = @_;
-
-    my $id;
-    first {
-        $id = _findID(
-            path => $_,
-            %params
+class LiteManager(InventoryModule):
+    """LiteManager remote management inventory module."""
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        if platform.system() != 'Windows':
+            return False
+        
+        from GLPI.Agent.Tools.Win32 import get_registry_key
+        
+        def check_path(path):
+            key = get_registry_key(
+                path=path,
+                required=['ID (read only)'],
+                maxdepth=3,
+            )
+            return key and len(key) > 0
+        
+        paths = [
+            'HKEY_LOCAL_MACHINE/SYSTEM/LiteManager',
+            'HKEY_LOCAL_MACHINE/SOFTWARE/LiteManager',
+        ]
+        
+        return bool(first(check_path, paths))
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        litemanager_id = LiteManager._get_id(logger=logger)
+        
+        if litemanager_id:
+            if logger:
+                logger.debug(f'Found LiteManagerID : {litemanager_id}')
+            
+            if inventory:
+                inventory.add_entry(
+                    section='REMOTE_MGMT',
+                    entry={
+                        'ID': litemanager_id,
+                        'TYPE': 'litemanager'
+                    }
+                )
+        else:
+            if logger:
+                logger.debug('LiteManagerID not found')
+    
+    @staticmethod
+    def _get_id(**params) -> Optional[str]:
+        """Get LiteManager ID."""
+        def find_in_path(path):
+            return LiteManager._find_id(path=path, **params)
+        
+        paths = [
+            'HKEY_LOCAL_MACHINE/SYSTEM/LiteManager',
+            'HKEY_LOCAL_MACHINE/SOFTWARE/LiteManager',
+        ]
+        
+        return first(find_in_path, paths)
+    
+    @staticmethod
+    def _find_id(**params) -> Optional[str]:
+        """Find LiteManager ID in registry."""
+        from GLPI.Agent.Tools.Win32 import get_registry_key
+        
+        key = get_registry_key(
+            required=['ID (read only)'],
+            maxdepth=3,
+            **params
         )
-    } qw(
-        HKEY_LOCAL_MACHINE/SYSTEM/LiteManager
-        HKEY_LOCAL_MACHINE/SOFTWARE/LiteManager
-    );
-
-    return $id;
-}
-
-sub _findID {
-    my (%params) = @_;
-
-    GLPI::Agent::Tools::Win32->use();
-
-    my $key = GLPI::Agent::Tools::Win32::getRegistryKey(
-        %params,
-        # Important for remote inventory optimization
-        required    => [ 'ID (read only)' ],
-        maxdepth    => 3,
-    );
-
-    return unless $key && keys(%{$key});
-
-    my $parameters;
-
-    foreach my $sub (grep { m|/$| } keys(%{$key})) {
-        next unless $key->{$sub}->{"Server/"};
-        next unless $key->{$sub}->{"Server/"}->{"Parameters/"};
-        $parameters = $key->{$sub}->{"Server/"}->{"Parameters/"};
-        last if $parameters->{"/ID (read only)"};
-    }
-
-    return unless $parameters;
-
-    return $parameters->{"/ID (read only)"};
-}
-
-1;
+        
+        if not key or not len(key):
+            return None
+        
+        parameters = None
+        
+        for sub in [k for k in key.keys() if k.endswith('/')]:
+            if not key[sub].get('Server/'):
+                continue
+            if not key[sub]['Server/'].get('Parameters/'):
+                continue
+            parameters = key[sub]['Server/']['Parameters/']
+            if parameters.get('/ID (read only)'):
+                break
+        
+        if not parameters:
+            return None
+        
+        return parameters.get('/ID (read only)')

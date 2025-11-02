@@ -1,77 +1,81 @@
-package GLPI::Agent::Task::Inventory::Linux::Inputs;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Linux Inputs - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, List, Dict
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_read, get_all_lines
 
-use GLPI::Agent::Tools;
 
-use constant    category    => "input";
-
-sub isEnabled {
-    return canRead('/proc/bus/input/devices');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my @lines = getAllLines(
-        file => '/proc/bus/input/devices',
-        logger => $logger
-    );
-    return unless @lines;
-
-    my @inputs;
-    my $device;
-    my $in;
-
-    foreach my $line (@lines) {
-        if ($line =~ /^I: Bus=.*Vendor=(.*) Prod/) {
-            $in = 1;
-            $device->{vendor}=$1;
-        } elsif ($line =~ /^$/) {
-            $in = 0;
-            if ($device->{phys} && $device->{phys} =~ "input") {
-                push @inputs, {
-                    DESCRIPTION => $device->{name},
-                    CAPTION     => $device->{name},
-                    TYPE        => $device->{type},
-                };
-            }
-
-            $device = {};
-        } elsif ($in) {
-            if ($line =~ /^P: Phys=.*(button).*/i) {
-                $device->{phys}="nodev";
-            } elsif ($line =~ /^P: Phys=.*(input).*/i) {
-                $device->{phys}="input";
-            }
-            if ($line =~ /^N: Name=\"(.*)\"/i) {
-                $device->{name}=$1;
-            }
-            if ($line =~ /^H: Handlers=(\w+)/i) {
-                if ($1 =~ ".*kbd.*") {
-                    $device->{type}="Keyboard";
-                } elsif ($1 =~ ".*mouse.*") {
-                    $device->{type}="Pointing";
-                } else {
-                    # Keyboard ou Pointing
-                    $device->{type}=$1;
-                }
-            }
-        }
-    }
-
-    foreach my $input (@inputs) {
-        $inventory->addEntry(
-            section => 'INPUTS',
-            entry   => $input
-        );
-    }
-}
-
-1;
+class Inputs(InventoryModule):
+    """Linux input devices detection module."""
+    
+    category = "input"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_read('/proc/bus/input/devices')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        lines = get_all_lines(
+            file='/proc/bus/input/devices',
+            logger=logger
+        )
+        if not lines:
+            return
+        
+        inputs = []
+        device = {}
+        in_device = False
+        
+        for line in lines:
+            if re.match(r'^I: Bus=.*Vendor=(.*) Prod', line):
+                in_device = True
+                match = re.search(r'Vendor=([^\s]+)', line)
+                if match:
+                    device['vendor'] = match.group(1)
+            elif re.match(r'^$', line):
+                in_device = False
+                if device.get('phys') and 'input' in device['phys']:
+                    inputs.append({
+                        'DESCRIPTION': device.get('name'),
+                        'CAPTION': device.get('name'),
+                        'TYPE': device.get('type'),
+                    })
+                device = {}
+            elif in_device:
+                if re.search(r'^P: Phys=.*(button).*', line, re.IGNORECASE):
+                    device['phys'] = 'nodev'
+                elif re.search(r'^P: Phys=.*(input).*', line, re.IGNORECASE):
+                    device['phys'] = 'input'
+                
+                name_match = re.match(r'^N: Name="(.*)"', line, re.IGNORECASE)
+                if name_match:
+                    device['name'] = name_match.group(1)
+                
+                handler_match = re.match(r'^H: Handlers=(\w+)', line, re.IGNORECASE)
+                if handler_match:
+                    handler = handler_match.group(1)
+                    if 'kbd' in handler:
+                        device['type'] = 'Keyboard'
+                    elif 'mouse' in handler:
+                        device['type'] = 'Pointing'
+                    else:
+                        # Keyboard or Pointing
+                        device['type'] = handler
+        
+        for input_device in inputs:
+            if inventory:
+                inventory.add_entry(
+                    section='INPUTS',
+                    entry=input_device
+                )

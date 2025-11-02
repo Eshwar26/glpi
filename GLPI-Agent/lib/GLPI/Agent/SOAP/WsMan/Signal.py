@@ -1,17 +1,13 @@
-package GLPI::Agent::SOAP::WsMan::Signal;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
+class Signal(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::Signal
+    WSMan Signal node handling.
+    """
+    xmlns = 'rsp'
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    Signal;
-
-use parent
-    'Node';
-
-use constant    xmlns   => 'rsp';
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.

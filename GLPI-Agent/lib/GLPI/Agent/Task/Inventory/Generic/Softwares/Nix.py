@@ -1,59 +1,72 @@
-package GLPI::Agent::Task::Inventory::Generic::Softwares::Nix;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Generic Softwares Nix - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, List, Dict, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_all_lines
 
-use GLPI::Agent::Tools;
 
-sub isEnabled {
-    return canRun('nix-store');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $command = 'nix-store --gc --print-live';
-    my $packages = _getPackagesList(
-        logger => $logger, command => $command
-    );
-    return unless $packages;
-
-    foreach my $package (@$packages) {
-        $inventory->addEntry(
-            section => 'SOFTWARES',
-            entry   => $package
-        );
-    }
-}
-
-sub _getPackagesList {
-    my (%params) = @_;
-
-    my @lines = getAllLines(%params)
-        or return;
-
-    my @packages;
-    my %seen   = ();
-    foreach my $line (@lines) {
-        next unless $line =~ m%^/nix/store/[^-]+-(.+)-(\d+(\.\d+)*)$%;
-
-        my $package = {
-            NAME        => $1,
-            VERSION     => $2,
-            FROM        => 'nix'
-        };
-
-        next if $seen{$package->{NAME} . '-' . $package->{VERSION}}++;
-
-        push @packages, $package;
-    }
-
-    return \@packages;
-}
-
-1;
+class Nix(InventoryModule):
+    """Nix package inventory module."""
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('nix-store')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        command = 'nix-store --gc --print-live'
+        packages = Nix._get_packages_list(
+            logger=logger,
+            command=command
+        )
+        if not packages:
+            return
+        
+        for package in packages:
+            if inventory:
+                inventory.add_entry(
+                    section='SOFTWARES',
+                    entry=package
+                )
+    
+    @staticmethod
+    def _get_packages_list(**params) -> Optional[List[Dict[str, str]]]:
+        """Get list of Nix packages."""
+        lines = get_all_lines(**params)
+        if not lines:
+            return None
+        
+        packages = []
+        seen = set()
+        
+        for line in lines:
+            match = re.match(r'^/nix/store/[^-]+-(.+)-(\d+(?:\.\d+)*)$', line)
+            if not match:
+                continue
+            
+            name, version = match.groups()
+            
+            package = {
+                'NAME': name,
+                'VERSION': version,
+                'FROM': 'nix'
+            }
+            
+            key = f"{name}-{version}"
+            if key in seen:
+                continue
+            seen.add(key)
+            
+            packages.append(package)
+        
+        return packages

@@ -1,140 +1,134 @@
-package GLPI::Agent::Task::Inventory::Virtualization::Libvirt;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Virtualization Libvirt - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any, Dict, List, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
-
-use English qw(-no_match_vars);
-
-use GLPI::Agent::Tools;
-use GLPI::Agent::XML;
-
-sub isEnabled {
-    return canRun('virsh');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    foreach my $machine (_getMachines(logger => $logger)) {
-        $inventory->addEntry(
-            section => 'VIRTUALMACHINES', entry => $machine
-        );
-    }
-
-    foreach my $machine (_getMachines(logger => $logger, uri => 'lxc:///')) {
-        $inventory->addEntry(
-            section => 'VIRTUALMACHINES', entry => $machine
-        );
-    }
-
-}
-
-sub _getMachines {
-    my (%params) = @_;
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import get_all_lines, can_run
+from GLPI.Agent.XML import XML
 
 
-    my $uri_param = $params{'uri'} ? "-c ".$params{'uri'} : "";
+class Libvirt(InventoryModule):
+    """Libvirt/KVM/LXC virtual machines detection module using virsh."""
 
-    my @machines = _parseList(
-        command => "virsh $uri_param --readonly list --all",
-        logger  => $params{logger}
-    );
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled (virsh available)."""
+        return can_run('virsh')
 
-    foreach my $machine (@machines) {
-        my %infos = _parseDumpxml(
-            command => "virsh $uri_param --readonly dumpxml $machine->{NAME}",
-            logger  => $params{logger}
-        );
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection using virsh for default and lxc URIs."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
 
-        $machine->{MEMORY}    = $infos{memory};
-        $machine->{UUID}      = $infos{uuid};
-        $machine->{SUBSYSTEM} = $infos{vmtype};
-        $machine->{VCPU}      = $infos{vcpu};
-    }
+        for machine in Libvirt._get_machines(logger=logger):
+            if inventory:
+                inventory.add_entry(section='VIRTUALMACHINES', entry=machine)
 
-    return @machines;
-}
+        for machine in Libvirt._get_machines(logger=logger, uri='lxc:///'):
+            if inventory:
+                inventory.add_entry(section='VIRTUALMACHINES', entry=machine)
 
-sub _parseList {
-    my (%params) = @_;
+    @staticmethod
+    def _get_machines(**params) -> List[Dict[str, Any]]:
+        uri = params.get('uri')
+        logger = params.get('logger')
+        uri_param = f"-c {uri}" if uri else ""
 
-    my @lines = getAllLines(%params)
-        or return;
+        machines = Libvirt._parse_list(
+            command=f"virsh {uri_param} --readonly list --all".strip(),
+            logger=logger,
+        )
 
-    my @machines;
-    foreach my $line (@lines) {
-        next if $line =~ /^\s*Id/;
-        next if $line =~ /^-{5}/;
-        next unless $line =~ /^\s*(\d+|)(\-|)\s+(\S+)\s+(\S.+)/;
+        for machine in machines:
+            infos = Libvirt._parse_dumpxml(
+                command=f"virsh {uri_param} --readonly dumpxml {machine['NAME']}",
+                logger=logger,
+            )
+            if infos:
+                machine['MEMORY'] = infos.get('memory')
+                machine['UUID'] = infos.get('uuid')
+                machine['SUBSYSTEM'] = infos.get('vmtype')
+                machine['VCPU'] = infos.get('vcpu')
 
-        my $name = $3;
+        return machines
 
-        # ignore Xen Dom0
-        next if $name eq 'Domain-0';
+    @staticmethod
+    def _parse_list(**params) -> List[Dict[str, Any]]:
+        lines = get_all_lines(**params) or []
+        machines: List[Dict[str, Any]] = []
 
-        my $status = $4;
-        $status =~ s/^shut off/off/;
+        for line in lines:
+            if line.strip().startswith('Id'):
+                continue
+            if line.startswith('-----'):
+                continue
 
-        my $machine = {
-            NAME      => $name,
-            STATUS    => $status,
-            VMTYPE    => "libvirt",
-        };
+            # Expected format: Id Name State (or with blanks for Id)
+            # Regex ported from perl: ^\s*(\d+|)(\-|)\s+(\S+)\s+(\S.+)
+            import re
+            m = re.match(r"^\s*(\d+|)(\-|)\s+(\S+)\s+(\S.+)", line)
+            if not m:
+                continue
 
-        push @machines, $machine;
-    }
+            name = m.group(3)
 
-    return @machines;
-}
+            # ignore Xen Dom0
+            if name == 'Domain-0':
+                continue
 
-sub _getKeyText {
-    my ($key) = @_;
+            status = m.group(4)
+            status = status.replace('shut off', 'off', 1) if status.startswith('shut off') else status
 
-    if (ref($key) eq 'HASH') {
-        return $key->{'#text'};
-    } else {
-        return $key;
-    }
-}
+            machines.append({
+                'NAME': name,
+                'STATUS': status,
+                'VMTYPE': 'libvirt',
+            })
 
-sub _parseDumpxml {
-    my (%params) = @_;
+        return machines
 
-    my $xml = getAllLines(%params);
-    if (!$xml) {
-        $params{logger}->error("No virsh xmldump output");
-        return;
-    }
+    @staticmethod
+    def _get_key_text(value):
+        if isinstance(value, dict):
+            return value.get('#text')
+        return value
 
-    my $data;
-    eval {
-        $data = GLPI::Agent::XML->new(string => $xml)->dump_as_hash();
-    };
-    if ($EVAL_ERROR) {
-        $params{logger}->error("Failed to parse XML output");
-        return;
-    }
+    @staticmethod
+    def _parse_dumpxml(**params) -> Optional[Dict[str, Any]]:
+        lines = get_all_lines(**params)
+        logger = params.get('logger')
+        if not lines:
+            if logger:
+                logger.error('No virsh xmldump output')
+            return None
 
-    my $vcpu   = _getKeyText($data->{domain}{vcpu});
-    my $uuid   = _getKeyText($data->{domain}{uuid});
-    my $vmtype = $data->{domain}{'-type'};
-    my $memory;
-    my $currentMemory = _getKeyText($data->{domain}{currentMemory});
-    if ($currentMemory =~ /(\d+)\d{3}$/) {
-        $memory = $1;
-    }
+        try:
+            data = XML(string='\n'.join(lines)).dump_as_hash()
+        except Exception:
+            if logger:
+                logger.error('Failed to parse XML output')
+            return None
 
-    return (
-        vcpu => $vcpu,
-        uuid => $uuid,
-        vmtype => $vmtype,
-        memory => $memory,
-    );
-}
+        domain = data.get('domain', {}) if isinstance(data, dict) else {}
+        vcpu = Libvirt._get_key_text(domain.get('vcpu'))
+        uuid = Libvirt._get_key_text(domain.get('uuid'))
+        vmtype = domain.get('-type')
+        memory = None
+        current_memory = Libvirt._get_key_text(domain.get('currentMemory'))
+        if isinstance(current_memory, str):
+            import re
+            m = re.match(r"(\d+)\d{3}$", current_memory)
+            if m:
+                memory = int(m.group(1))
 
-1;
+        return {
+            'vcpu': vcpu,
+            'uuid': uuid,
+            'vmtype': vmtype,
+            'memory': memory,
+        }
+

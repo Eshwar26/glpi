@@ -1,140 +1,152 @@
-package GLPI::Agent::Task::Inventory::Solaris::Memory;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Solaris Memory - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, List, Dict
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import get_first_match, get_canonical_size, get_canonical_speed
+from GLPI.Agent.Tools.Solaris import get_zone, get_prtdiag_infos, get_smbios
 
-use English qw(-no_match_vars);
-use UNIVERSAL::require;
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Solaris;
-
-use constant    category    => "memory";
-
-sub isEnabled {
-    return 1;
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $memorySize = getFirstMatch(
-        command => '/usr/sbin/prtconf',
-        logger  => $logger,
-        pattern => qr/^Memory\ssize:\s+(\S+)/
-    );
-
-    my $swapSize = getFirstMatch(
-        command => '/usr/sbin/swap -l',
-        logger  => $logger,
-        pattern => qr/\s+(\d+)$/
-    );
-
-    $inventory->setHardware({
-        MEMORY => $memorySize,
-        SWAP =>   $swapSize
-    });
-
-    my $zone = getZone();
-
-    my @memories = $zone eq 'global' ?
-        _getMemoriesPrtdiag() :
-        _getZoneAllocatedMemories($memorySize) ;
-
-    foreach my $memory (@memories) {
-        $inventory->addEntry(
-            section => 'MEMORIES',
-            entry   => $memory
-        );
-    }
-}
-
-sub _getMemoriesPrtdiag {
-    my %params = @_;
-
-    my $info = getPrtdiagInfos(%params);
-    return unless $info && $info->{memories};
-
-    my @memories = @{$info->{memories}};
-
-    # Update file to smbios test file for unitest
-    $params{file} = $params{smbios} if exists($params{smbios});
-
-    my $smbios = getSmbios(%params);
-    if ($smbios && $smbios->{SMB_TYPE_MEMDEVICE}) {
-
-        GLPI::Agent::Tools::PartNumber->require();
-
-        foreach my $memory (@memories) {
-            next unless defined($memory->{NUMSLOTS});
-
-            my $module = $smbios->{SMB_TYPE_MEMDEVICE}->[$memory->{NUMSLOTS}]
-                or next;
-
-            if ($module->{'Memory Type'}) {
-                if ($module->{'Memory Type'} =~ /^ \d+ \s+ \( (.*) \) $/x) {
-                    $memory->{TYPE} = $1;
-                } else {
-                    $memory->{TYPE} = $module->{'Memory Type'};
-                }
-            }
-
-            $memory->{MODEL} = $module->{'Part Number'}
-                if $module->{'Part Number'};
-
-            $memory->{CAPTION} = $module->{'Location Tag'}
-                if $module->{'Location Tag'};
-
-            $memory->{CAPACITY} = getCanonicalSize($module->{'Size'}, 1024)
-                if $module->{'Size'};
-
-            $memory->{SPEED} = getCanonicalSpeed($module->{'Speed'})
-                if $module->{'Speed'};
-
-            $memory->{SERIALNUMBER} = $module->{'Serial Number'}
-                if $module->{'Serial Number'} && $module->{'Serial Number'} !~ /^0+$/;
-
-            if ($module->{'Manufacturer'} && $module->{'Manufacturer'} =~ /^8([0-9A-F])([0-9A-F]{2})$/i) {
-                my $mmid = "Bank ".(hex("0x$1")+1).", Hex 0x".uc($2);
-                my $partnumber_factory = GLPI::Agent::Tools::PartNumber->new(@_);
-                my $partnumber = $partnumber_factory->match(
-                    partnumber  => $module->{'Part Number'},
-                    category    => "memory",
-                    mm_id       => $mmid,
-                );
-                if ($partnumber) {
-                    $memory->{MANUFACTURER} = $partnumber->manufacturer;
-                    $memory->{SPEED} = $partnumber->speed
-                        if !$memory->{SPEED} && $partnumber->speed;
-                    $memory->{TYPE} = $partnumber->type
-                        if !$memory->{TYPE} && $partnumber->type;
-                }
-            }
-        }
-    }
-
-    return @memories;
-}
-
-sub _getZoneAllocatedMemories {
-    my ($size) = @_;
-
-    my @memories;
-
-    # Just format one virtual memory slot with the detected memory size
-    push @memories, {
-            DESCRIPTION => "Allocated memory",
-            CAPTION     => "Shared memory",
-            NUMSLOTS    => 1,
-            CAPACITY    => $size
-    };
-
-    return @memories;
-}
-
-1;
+class Memory(InventoryModule):
+    """Solaris memory detection module."""
+    
+    category = "memory"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return True
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        memory_size = get_first_match(
+            command='/usr/sbin/prtconf',
+            logger=logger,
+            pattern=r'^Memory\ssize:\s+(\S+)'
+        )
+        
+        swap_size = get_first_match(
+            command='/usr/sbin/swap -l',
+            logger=logger,
+            pattern=r'\s+(\d+)$'
+        )
+        
+        if inventory:
+            inventory.set_hardware({
+                'MEMORY': memory_size,
+                'SWAP': swap_size
+            })
+        
+        zone = get_zone()
+        
+        memories = (Memory._get_memories_prtdiag(**params) if zone == 'global'
+                   else Memory._get_zone_allocated_memories(memory_size))
+        
+        for memory in memories:
+            if inventory:
+                inventory.add_entry(
+                    section='MEMORIES',
+                    entry=memory
+                )
+    
+    @staticmethod
+    def _get_memories_prtdiag(**params) -> List[Dict[str, Any]]:
+        """Get memory information from prtdiag."""
+        info = get_prtdiag_infos(**params)
+        if not info or not info.get('memories'):
+            return []
+        
+        memories = info['memories']
+        
+        # Update file to smbios test file for unittest
+        if 'smbios' in params:
+            params['file'] = params['smbios']
+        
+        smbios = get_smbios(**params)
+        if smbios and smbios.get('SMB_TYPE_MEMDEVICE'):
+            try:
+                from GLPI.Agent.Tools.PartNumber import PartNumber
+                partnumber_factory = PartNumber()
+            except ImportError:
+                partnumber_factory = None
+            
+            for memory in memories:
+                if not memory.get('NUMSLOTS') is not None:
+                    continue
+                
+                numslot = memory['NUMSLOTS']
+                if numslot >= len(smbios['SMB_TYPE_MEMDEVICE']):
+                    continue
+                
+                module = smbios['SMB_TYPE_MEMDEVICE'][numslot]
+                if not module:
+                    continue
+                
+                if module.get('Memory Type'):
+                    mem_type = module['Memory Type']
+                    # Parse format like "26 (DDR4)"
+                    match = re.match(r'^ \d+ \s+ \( (.*) \) $', mem_type, re.VERBOSE)
+                    if match:
+                        memory['TYPE'] = match.group(1)
+                    else:
+                        memory['TYPE'] = mem_type
+                
+                if module.get('Part Number'):
+                    memory['MODEL'] = module['Part Number']
+                
+                if module.get('Location Tag'):
+                    memory['CAPTION'] = module['Location Tag']
+                
+                if module.get('Size'):
+                    memory['CAPACITY'] = get_canonical_size(module['Size'], 1024)
+                
+                if module.get('Speed'):
+                    memory['SPEED'] = get_canonical_speed(module['Speed'])
+                
+                if module.get('Serial Number') and not re.match(r'^0+$', module['Serial Number']):
+                    memory['SERIALNUMBER'] = module['Serial Number']
+                
+                if module.get('Manufacturer'):
+                    manufacturer = module['Manufacturer']
+                    match = re.match(r'^8([0-9A-F])([0-9A-F]{2})$', manufacturer, re.IGNORECASE)
+                    if match and partnumber_factory:
+                        mmid = f"Bank {int(match.group(1), 16) + 1}, Hex 0x{match.group(2).upper()}"
+                        try:
+                            partnumber = partnumber_factory.match(
+                                partnumber=module.get('Part Number'),
+                                category='memory',
+                                mm_id=mmid
+                            )
+                            if partnumber:
+                                memory['MANUFACTURER'] = partnumber.manufacturer()
+                                if not memory.get('SPEED') and partnumber.speed():
+                                    memory['SPEED'] = partnumber.speed()
+                                if not memory.get('TYPE') and partnumber.type():
+                                    memory['TYPE'] = partnumber.type()
+                        except Exception:
+                            pass
+        
+        return memories
+    
+    @staticmethod
+    def _get_zone_allocated_memories(size: str) -> List[Dict[str, Any]]:
+        """Get memory information for Solaris zones."""
+        memories = []
+        
+        # Just format one virtual memory slot with the detected memory size
+        memories.append({
+            'DESCRIPTION': 'Allocated memory',
+            'CAPTION': 'Shared memory',
+            'NUMSLOTS': 1,
+            'CAPACITY': size
+        })
+        
+        return memories

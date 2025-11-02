@@ -1,31 +1,20 @@
-package GLPI::Agent::SOAP::WsMan::ResourceURI;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
+# from glpi.agent.soap.wsman.attribute import Attribute
 
-use strict;
-use warnings;
+class ResourceURI(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::ResourceURI
+    WSMan ResourceURI node handling.
+    """
+    xmlns = 'w'
 
-use GLPI::Agent::SOAP::WsMan::Node;
+    def __init__(self, url):
+        """
+        Initialize a ResourceURI node.
 
-## no critic (ProhibitMultiplePackages)
-package
-    ResourceURI;
-
-use parent
-    'Node';
-
-use constant    xmlns   => 'w';
-
-use GLPI::Agent::SOAP::WsMan::Attribute;
-
-sub new {
-    my ($class, $url) = @_;
-
-    my $self = $class->SUPER::new(
-        Attribute->must_understand(),
-        $url,
-    );
-
-    bless $self, $class;
-    return $self;
-}
-
-1;
+        Args:
+            url (str): The resource URL.
+        """
+        # Call the parent (Node) constructor with must_understand() attribute and the URL.
+        super().__init__(Attribute.must_understand(), url)

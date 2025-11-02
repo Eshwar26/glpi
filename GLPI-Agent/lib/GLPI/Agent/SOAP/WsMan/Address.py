@@ -1,37 +1,25 @@
-package GLPI::Agent::SOAP::WsMan::Address;
+from typing import Optional
 
-use strict;
-use warnings;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
+# from glpi.agent.soap.wsman.attribute import Attribute
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    Address;
+class Address(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::Address
+    WSMan Address node handling.
+    """
+    xmlns = 'a'
 
-use parent
-    'Node';
+    def __init__(self, url: str):
+        must_understand_attr = Attribute.must_understand()
+        super().__init__(must_understand_attr, url)
 
-use constant    xmlns   => 'a';
+    @classmethod
+    def anonymous(cls) -> 'Address':
+        return cls("http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous")
 
-use GLPI::Agent::SOAP::WsMan::Attribute;
 
-sub new {
-    my ($class, $url) = @_;
-
-    my $self = $class->SUPER::new(
-        Attribute->must_understand(),
-        $url,
-    );
-
-    bless $self, $class;
-    return $self;
-}
-
-sub anonymous {
-    my ($class) = @_;
-
-    return $class->new("http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous");
-}
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.

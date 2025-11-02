@@ -1,84 +1,77 @@
-package GLPI::Agent::Task::Inventory::Virtualization::VmWareESX;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Virtualization VMware ESX - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, Dict, List, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_all_lines, has_file, get_first_match
 
-use GLPI::Agent::Tools;
 
-sub isEnabled {
-    return canRun('vmware-cmd');
-}
+class VmWareESX(InventoryModule):
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        return can_run('vmware-cmd')
 
-sub doInventory {
-    my (%params) = @_;
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        inventory = params.get('inventory')
+        logger = params.get('logger')
 
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
+        for machine in VmWareESX._get_machines(command='vmware-cmd -l', logger=logger):
+            if inventory:
+                inventory.add_entry(section='VIRTUALMACHINES', entry=machine)
 
-    foreach my $machine (_getMachines(
-        command => 'vmware-cmd -l', logger => $logger
-    )) {
-        $inventory->addEntry(
-            section => 'VIRTUALMACHINES', entry => $machine
-        );
-    }
-}
+    @staticmethod
+    def _get_machines(**params) -> List[Dict[str, Any]]:
+        lines = get_all_lines(**params) or []
+        logger = params.get('logger')
+        machines: List[Dict[str, Any]] = []
+        for line in lines:
+            path = line.strip()
+            if not path or not has_file(path):
+                continue
+            info = VmWareESX._get_machine_info(file=path, logger=logger)
+            if not info:
+                continue
+            machine = {
+                'MEMORY': info.get('memsize'),
+                'NAME': info.get('displayName'),
+                'UUID': info.get('uuid.bios'),
+                'SUBSYSTEM': 'VmWareESX',
+                'VMTYPE': 'VmWare',
+            }
+            status = get_first_match(
+                command=f"vmware-cmd '{path}' getstate",
+                logger=logger,
+                pattern=r'= (\w+)',
+            ) or 'unknown'
+            machine['STATUS'] = status
 
-sub _getMachines {
-    my (%params) = @_;
+            if machine['UUID']:
+                uuid = re.sub(r'\s+', '', machine['UUID'])
+                m = re.match(r'^(........)(....)(....)-(....)(.+)$', uuid)
+                if m:
+                    uuid = f"{m.group(1)}-{m.group(2)}-{m.group(3)}-{m.group(4)}-{m.group(5)}"
+                machine['UUID'] = uuid
 
-    my @lines = getAllLines(%params)
-        or return;
+            machines.append(machine)
+        return machines
 
-    my @machines;
-    foreach my $line (@lines) {
-        next unless has_file($line);
+    @staticmethod
+    def _get_machine_info(**params) -> Optional[Dict[str, Any]]:
+        lines = get_all_lines(**params) or []
+        if not lines:
+            return None
+        info: Dict[str, Any] = {}
+        for line in lines:
+            m = re.match(r'^(\S+)\s*=\s*(\S+.*)', line)
+            if not m:
+                continue
+            key, value = m.group(1), m.group(2)
+            value = re.sub(r'^(\"|\")|((\"|\"))$', '', value).strip('"')
+            info[key] = value
+        return info
 
-        my %info = _getMachineInfo(file => $line, logger => $params{logger});
-
-        my $machine = {
-            MEMORY    => $info{'memsize'},
-            NAME      => $info{'displayName'},
-            UUID      => $info{'uuid.bios'},
-            SUBSYSTEM => "VmWareESX",
-            VMTYPE    => "VmWare",
-        };
-
-        $machine->{STATUS} = getFirstMatch(
-            command => "vmware-cmd '$line' getstate",
-            logger  => $params{logger},
-            pattern => qr/= (\w+)/
-        ) || 'unknown';
-
-        # correct uuid format
-        $machine->{UUID} =~ s/\s+//g;      # delete space
-        $machine->{UUID} =~ s/^(........)(....)(....)-(....)(.+)$/$1-$2-$3-$4-$5/; # add dashs
-
-        push @machines, $machine;
-
-    }
-
-    return @machines;
-}
-
-sub _getMachineInfo {
-    my (%params) = @_;
-
-    my @lines = getAllLines(%params)
-        or return;
-
-    my %info;
-    foreach my $line (@lines) {
-        next unless $line =~ /^(\S+)\s*=\s*(\S+.*)/;
-        my $key = $1;
-        my $value = $2;
-        $value =~ s/(^"|"$)//g;
-        $info{$key} = $value;
-    }
-
-    return %info;
-}
-
-1;

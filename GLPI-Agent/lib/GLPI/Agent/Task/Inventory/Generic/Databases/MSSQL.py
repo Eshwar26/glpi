@@ -1,228 +1,250 @@
-package GLPI::Agent::Task::Inventory::Generic::Databases::MSSQL;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Generic Databases MSSQL - Python Implementation
+"""
 
-use English qw(-no_match_vars);
+import os
+import platform
+import re
+from typing import Any, List, Optional
 
-use strict;
-use warnings;
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_first_line, get_all_lines, get_canonical_size
+from GLPI.Agent.Inventory.DatabaseService import DatabaseService
 
-use UNIVERSAL::require;
 
-use parent 'GLPI::Agent::Task::Inventory::Generic::Databases';
-
-use GLPI::Agent::Tools;
-use GLPI::Agent::Inventory::DatabaseService;
-
-sub isEnabled {
-    return canRun('sqlcmd') ||
-        canRun('/opt/mssql-tools/bin/sqlcmd');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-
-    # Try to retrieve credentials updating params
-    GLPI::Agent::Task::Inventory::Generic::Databases::_credentials(\%params, "mssql");
-
-    my $dbservices = _getDatabaseService(%params);
-
-    foreach my $dbs (@{$dbservices}) {
-        $inventory->addEntry(
-            section => 'DATABASES_SERVICES',
-            entry   => $dbs->entry(),
-        );
-    }
-}
-
-sub _getDatabaseService {
-    my (%params) = @_;
-
-    my $credentials = delete $params{credentials};
-    return [] unless $credentials && ref($credentials) eq 'ARRAY';
-
-    # Handle default credentials case
-    if (@{$credentials} == 1 && !keys(%{$credentials->[0]})) {
-        # On windows, we can discover instance names in registry
-        if (OSNAME eq 'MSWin32') {
-            GLPI::Agent::Tools::Win32->require();
-            my $instances = GLPI::Agent::Tools::Win32::getRegistryKey(
-                path => 'HKEY_LOCAL_MACHINE/SOFTWARE/Microsoft/Microsoft SQL Server/Instance Names/SQL',
-            );
-            foreach my $key (%{$instances}) {
-                # Only consider valuename keys
-                my ($instance) = $key =~ m{^/(.+)$}
-                    or next;
-                # Default credentials will still match MSSQLSERVER instance
-                next if $instance eq 'MSSQLSERVER';
-                push @{$credentials}, {
-                    type        => "_discovered_instance",
-                    instance    => $instance,
-                };
-            }
-        }
-        # Add SQLExpress default credential when trying default credential
-        push @{$credentials}, {
-            type    => "login_password",
-            socket  => "localhost\\SQLExpress",
-        };
-    }
-
-    my @dbs = ();
-
-    # Support sqlcmd on linux with standard full path for command from mssql-tools package
-    $params{sqlcmd} = '/opt/mssql-tools/bin/sqlcmd'
-        unless canRun('sqlcmd');
-
-    foreach my $credential (@{$credentials}) {
-        GLPI::Agent::Task::Inventory::Generic::Databases::trying_credentials($params{logger}, $credential);
-        $params{options} = _mssqlOptions($credential) // "-l 5";
-
-        my $productversion = _runSql(
-            sql     => "SELECT SERVERPROPERTY('productversion')",
-            %params
-        )
-            or next;
-
-        my $name =_runSql(
-            sql     => "SELECT \@\@servicename",
-            %params
-        )
-            or next;
-
-        my $version =_runSql(
-            sql     => "SELECT \@\@version",
-            %params
-        )
-            or next;
-        my ($manufacturer) = $version =~ /^
-            (Microsoft) \s+
-            SQL \s+ Server \s+ \d+
-        /xi
-            or next;
-
-        my $dbs_size = 0;
-        my $starttime = _runSql(
-            sql => "SELECT sqlserver_start_time FROM sys.dm_os_sys_info",
-            %params
-        );
-        $starttime =~ s/\..*$//;
-
-        my $dbs = GLPI::Agent::Inventory::DatabaseService->new(
-            type            => "mssql",
-            name            => $name,
-            version         => $productversion,
-            manufacturer    => $manufacturer,
-            port            => $credential->{port} // "1433",
-            is_active       => 1,
-            last_boot_date  => $starttime,
-        );
-
-        foreach my $db (_runSql(
-            sql => "SELECT name,create_date,state FROM sys.databases",
-            %params
-        )) {
-            my ($db_name, $db_create, $state) = $db =~ /^(\S+);([^.]*)\.\d+;(\d+)$/
-                or next;
-
-            my ($size) = _runSql(
-                sql => "USE [$db_name] ; EXEC sp_spaceused",
-                %params
-            ) =~ /^$db_name;([0-9.]+\s*\S+);/;
-            if ($size) {
-                $size = getCanonicalSize($size, 1024);
-                $dbs_size += $size;
-            } else {
-                undef $size;
-            }
-
-            # Find update date
-            my ($updated) = _runSql(
-                sql => "USE [$db_name] ; SELECT TOP(1) modify_date FROM sys.objects ORDER BY modify_date DESC",
-                %params
-            ) =~ /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/;
-
-            $dbs->addDatabase(
-                name            => $db_name,
-                size            => int($size),
-                is_active       => int($state) == 0 ? 1 : 0,
-                creation_date   => $db_create,
-                update_date     => $updated,
-            );
-        }
-
-        $dbs->size(int($dbs_size));
-
-        push @dbs, $dbs;
-    }
-
-    return \@dbs;
-}
-
-sub _runSql {
-    my (%params) = @_;
-
-    my $sql = delete $params{sql}
-        or return;
-
-    my $command = $params{sqlcmd} // "sqlcmd";
-    $command .= " ".$params{options} if defined($params{options});
-    $command .= " -X1 -t 30 -K ReadOnly -r1 -W -h -1 -s \";\" -Q \"$sql\"";
-
-    # Only to support unittests
-    if ($params{file}) {
-        $sql =~ s/\s+/-/g;
-        $sql =~ s/[^-_0-9A-Za-z]//g;
-        $sql =~ s/[-][-]+/-/g;
-        $params{file} .= "-" . lc($sql);
-        unless ($params{istest}) {
-            print STDERR "\nGenerating $params{file} for new MSSQL test case...\n";
-            system("$command >$params{file}");
-        }
-    } else {
-        $params{command} = $command;
-    }
-
-    if (wantarray) {
-        return map {
-            my $line = $_;
-            chomp($line);
-            $line =~ s/\r$//;
-            $line
-        } getAllLines(%params);
-    } else {
-        my $result = getFirstLine(%params);
-        if (defined($result)) {
-            chomp($result);
-            $result =~ s/\r$//;
-        }
-        return $result;
-    }
-}
-
-sub _mssqlOptions {
-    my ($credential) = @_;
-
-    return unless $credential->{type};
-
-    my $options = "-l 5";
-    if ($credential->{type} eq "login_password") {
-        if ($credential->{host}) {
-            $options  = "-l 30";
-            $options .= " -S $credential->{host}" ;
-            $options .= ",$credential->{port}" if $credential->{port};
-        }
-        $options .= " -U $credential->{login}" if $credential->{login};
-        $options .= " -S $credential->{socket}" if ! $credential->{host} && $credential->{socket};
-        if ($credential->{password}) {
-            $credential->{password} =~ s/"/\\"/g;
-            $options .= ' -P "'.$credential->{password}.'"' ;
-        }
-    } elsif ($credential->{type} eq "_discovered_instance" && $credential->{instance}) {
-        $options .= " -S .\\$credential->{instance}" ;
-    }
-
-    return $options;
-}
-
-1;
+class MSSQL(InventoryModule):
+    """Microsoft SQL Server database inventory module."""
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('sqlcmd') or can_run('/opt/mssql-tools/bin/sqlcmd')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        
+        # Try to retrieve credentials
+        from GLPI.Agent.Task.Inventory.Generic.Databases import get_credentials
+        credentials = get_credentials(params, "mssql")
+        params['credentials'] = credentials
+        
+        dbservices = MSSQL._get_database_service(**params)
+        
+        for dbs in dbservices:
+            if inventory:
+                inventory.add_entry(
+                    section='DATABASES_SERVICES',
+                    entry=dbs.entry()
+                )
+    
+    @staticmethod
+    def _get_database_service(**params) -> List[DatabaseService]:
+        """Get MSSQL database service information."""
+        credentials = params.pop('credentials', None)
+        if not credentials or not isinstance(credentials, list):
+            return []
+        
+        # Handle default credentials case
+        if len(credentials) == 1 and not credentials[0]:
+            # On Windows, we can discover instance names in registry
+            if platform.system() == 'Windows':
+                from GLPI.Agent.Tools.Win32 import get_registry_key
+                instances = get_registry_key(
+                    path='HKEY_LOCAL_MACHINE/SOFTWARE/Microsoft/Microsoft SQL Server/Instance Names/SQL'
+                )
+                if instances:
+                    for key in instances.keys():
+                        # Only consider valuename keys
+                        match = re.match(r'^/(.+)$', key)
+                        if not match:
+                            continue
+                        instance = match.group(1)
+                        # Default credentials will still match MSSQLSERVER instance
+                        if instance == 'MSSQLSERVER':
+                            continue
+                        credentials.append({
+                            'type': '_discovered_instance',
+                            'instance': instance,
+                        })
+            # Add SQLExpress default credential when trying default credential
+            credentials.append({
+                'type': 'login_password',
+                'socket': 'localhost\\SQLExpress',
+            })
+        
+        dbs_list = []
+        
+        # Support sqlcmd on linux with standard full path for command from mssql-tools package
+        if 'sqlcmd' not in params:
+            params['sqlcmd'] = '/opt/mssql-tools/bin/sqlcmd' if not can_run('sqlcmd') else 'sqlcmd'
+        
+        for credential in credentials:
+            from GLPI.Agent.Task.Inventory.Generic.Databases import trying_credentials
+            trying_credentials(params.get('logger'), credential)
+            
+            params['options'] = MSSQL._mssql_options(credential) or '-l 5'
+            
+            productversion = MSSQL._run_sql(
+                sql="SELECT SERVERPROPERTY('productversion')",
+                **params
+            )
+            if not productversion:
+                continue
+            
+            name = MSSQL._run_sql(
+                sql='SELECT @@servicename',
+                **params
+            )
+            if not name:
+                continue
+            
+            version = MSSQL._run_sql(
+                sql='SELECT @@version',
+                **params
+            )
+            if not version:
+                continue
+            
+            match = re.match(
+                r'^\s*(Microsoft)\s+SQL\s+Server\s+\d+',
+                version,
+                re.IGNORECASE | re.VERBOSE
+            )
+            if not match:
+                continue
+            manufacturer = match.group(1)
+            
+            dbs_size = 0
+            starttime = MSSQL._run_sql(
+                sql='SELECT sqlserver_start_time FROM sys.dm_os_sys_info',
+                **params
+            )
+            if starttime:
+                starttime = re.sub(r'\..*$', '', starttime)
+            
+            dbs = DatabaseService(
+                type='mssql',
+                name=name,
+                version=productversion,
+                manufacturer=manufacturer,
+                port=credential.get('port', 1433),
+                is_active=True,
+                last_boot_date=starttime,
+            )
+            
+            db_list = MSSQL._run_sql(
+                sql='SELECT name,create_date,state FROM sys.databases',
+                array=True,
+                **params
+            )
+            
+            for db in db_list:
+                match = re.match(r'^(\S+);([^.]*)\.\d+;(\d+)$', db)
+                if not match:
+                    continue
+                db_name, db_create, state = match.groups()
+                
+                size_output = MSSQL._run_sql(
+                    sql=f'USE [{db_name}] ; EXEC sp_spaceused',
+                    array=True,
+                    **params
+                )
+                size = None
+                if size_output:
+                    size_line = size_output[0] if isinstance(size_output, list) else size_output
+                    size_match = re.search(rf'^{re.escape(db_name)};([0-9.]+\s*\S+);', size_line)
+                    if size_match:
+                        size = get_canonical_size(size_match.group(1), 1024)
+                        if size:
+                            dbs_size += size
+                
+                # Find update date
+                updated_output = MSSQL._run_sql(
+                    sql=f'USE [{db_name}] ; SELECT TOP(1) modify_date FROM sys.objects ORDER BY modify_date DESC',
+                    array=True,
+                    **params
+                )
+                updated = None
+                if updated_output:
+                    updated_line = updated_output[0] if isinstance(updated_output, list) else updated_output
+                    updated_match = re.match(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', updated_line)
+                    if updated_match:
+                        updated = updated_match.group(1)
+                
+                dbs.add_database(
+                    name=db_name,
+                    size=int(size) if size else None,
+                    is_active=(int(state) == 0),
+                    creation_date=db_create,
+                    update_date=updated,
+                )
+            
+            dbs.size(int(dbs_size))
+            
+            dbs_list.append(dbs)
+        
+        return dbs_list
+    
+    @staticmethod
+    def _run_sql(**params) -> Optional[Any]:
+        """Execute SQL command via sqlcmd."""
+        sql = params.pop('sql', None)
+        if not sql:
+            return None
+        
+        array = params.pop('array', False)
+        command = params.get('sqlcmd', 'sqlcmd')
+        if params.get('options'):
+            command += f" {params['options']}"
+        command += f' -X1 -t 30 -K ReadOnly -r1 -W -h -1 -s ";" -Q "{sql}"'
+        
+        # Support for unittests
+        if params.get('file'):
+            sql_clean = re.sub(r'\s+', '-', sql)
+            sql_clean = re.sub(r'[^-_0-9A-Za-z]', '', sql_clean)
+            sql_clean = re.sub(r'[-][-]+', '-', sql_clean)
+            file_path = f"{params['file']}-{sql_clean.lower()}"
+            if not params.get('istest'):
+                import sys
+                print(f"\nGenerating {file_path} for new MSSQL test case...", file=sys.stderr)
+                os.system(f"{command} >{file_path}")
+            params['file'] = file_path
+        else:
+            params['command'] = command
+        
+        if array:
+            lines = get_all_lines(**params)
+            return [line.rstrip('\r\n') for line in lines] if lines else []
+        else:
+            result = get_first_line(**params)
+            if result:
+                return result.rstrip('\r\n')
+            return None
+    
+    @staticmethod
+    def _mssql_options(credential: dict) -> Optional[str]:
+        """Build sqlcmd options from credential."""
+        if not credential.get('type'):
+            return None
+        
+        options = '-l 5'
+        if credential['type'] == 'login_password':
+            if credential.get('host'):
+                options = '-l 30'
+                options += f" -S {credential['host']}"
+                if credential.get('port'):
+                    options += f",{credential['port']}"
+            if credential.get('login'):
+                options += f" -U {credential['login']}"
+            if not credential.get('host') and credential.get('socket'):
+                options += f" -S {credential['socket']}"
+            if credential.get('password'):
+                password = credential['password'].replace('"', '\\"')
+                options += f' -P "{password}"'
+        elif credential['type'] == '_discovered_instance' and credential.get('instance'):
+            options += f" -S .\\{credential['instance']}"
+        
+        return options

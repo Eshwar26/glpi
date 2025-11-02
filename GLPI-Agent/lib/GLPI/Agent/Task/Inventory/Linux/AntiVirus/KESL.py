@@ -1,78 +1,84 @@
-package GLPI::Agent::Task::Inventory::Linux::AntiVirus::KESL;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Linux AntiVirus KESL - Python Implementation
+"""
 
-use strict;
-use warnings;
-use parent 'GLPI::Agent::Task::Inventory::Module';
+import re
+from typing import Any, Optional, Dict
 
-use GLPI::Agent::Tools;
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_first_line, get_all_lines
 
-sub isEnabled {
-    return canRun('kesl-control');
-}
 
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $antivirus = _getKESLInfo(logger => $logger);
-    if ($antivirus) {
-        $inventory->addEntry(
-            section => 'ANTIVIRUS',
-            entry   => $antivirus
-        );
-
-        $logger->debug2("Added $antivirus->{NAME}" .
-            ($antivirus->{VERSION} ? " v$antivirus->{VERSION}" : "") .
-            ($antivirus->{ENABLED} ? " [ENABLED]" : " [DISABLED]") .
-            ($antivirus->{EXPIRATION} ? " Expires: $antivirus->{EXPIRATION}" : ""))
-            if $logger;
-    }
-}
-
-sub _getKESLInfo {
-    my (%params) = @_;
-
-    my $av = {
-        NAME     => 'Kaspersky Endpoint Security for Linux',
-        COMPANY  => 'Kaspersky Lab',
-        ENABLED  => 0,
-        UPTODATE => 0,
-    };
-
-    my $service_status = getFirstLine(
-        file    => $params{ksel_active}, # Only used by tests
-        command => 'systemctl is-active kesl.service',
-        %params
-    );
-    $av->{ENABLED} = $service_status && $service_status eq 'active' ? 1 : 0;
-
-    my @app_info = getAllLines(
-        file    => $params{ksel_appinfo}, # Only used by tests
-        command => 'kesl-control --app-info',
-        %params
-    );
-
-    foreach my $line (@app_info) {
-
-        if (!$av->{VERSION} && $line =~ /^Version:\s+([\d.]+)/) {
-            $av->{VERSION} = $1;
-            next;
+class KESL(InventoryModule):
+    """Kaspersky Endpoint Security for Linux detection module."""
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('kesl-control')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        antivirus = KESL._get_kesl_info(logger=logger)
+        if antivirus:
+            if inventory:
+                inventory.add_entry(
+                    section='ANTIVIRUS',
+                    entry=antivirus
+                )
+            
+            if logger:
+                version_str = f" v{antivirus['VERSION']}" if antivirus.get('VERSION') else ""
+                enabled_str = " [ENABLED]" if antivirus.get('ENABLED') else " [DISABLED]"
+                expiration_str = f" Expires: {antivirus['EXPIRATION']}" if antivirus.get('EXPIRATION') else ""
+                logger.debug2(f"Added {antivirus['NAME']}{version_str}{enabled_str}{expiration_str}")
+    
+    @staticmethod
+    def _get_kesl_info(**params) -> Optional[Dict[str, Any]]:
+        """Get Kaspersky Endpoint Security for Linux information."""
+        av = {
+            'NAME': 'Kaspersky Endpoint Security for Linux',
+            'COMPANY': 'Kaspersky Lab',
+            'ENABLED': 0,
+            'UPTODATE': 0,
         }
-
-        if (!$av->{EXPIRATION} && $line =~ /license expiration date:\s+([\d-]+)/i) {
-            $av->{EXPIRATION} = $1;
-            next;
-        }
-
-        if (!$av->{BASE_VERSION} && $line =~ /^Last release date of databases:\s+([\d-]+)/) {
-            $av->{BASE_VERSION} = $1;
-            next;
-        }
-    }
-
-    return $av;
-}
-
-1;
+        
+        service_status = get_first_line(
+            file=params.get('ksel_active'),  # Only used by tests
+            command='systemctl is-active kesl.service',
+            **params
+        )
+        av['ENABLED'] = 1 if service_status and service_status == 'active' else 0
+        
+        app_info = get_all_lines(
+            file=params.get('ksel_appinfo'),  # Only used by tests
+            command='kesl-control --app-info',
+            **params
+        )
+        
+        if app_info:
+            for line in app_info:
+                if not av.get('VERSION'):
+                    match = re.match(r'^Version:\s+([\d.]+)', line)
+                    if match:
+                        av['VERSION'] = match.group(1)
+                        continue
+                
+                if not av.get('EXPIRATION'):
+                    match = re.search(r'license expiration date:\s+([\d-]+)', line, re.IGNORECASE)
+                    if match:
+                        av['EXPIRATION'] = match.group(1)
+                        continue
+                
+                if not av.get('BASE_VERSION'):
+                    match = re.match(r'^Last release date of databases:\s+([\d-]+)', line)
+                    if match:
+                        av['BASE_VERSION'] = match.group(1)
+                        continue
+        
+        return av

@@ -1,27 +1,20 @@
-package GLPI::Agent::SOAP::WsMan::OutputStreams;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
+class OutputStreams(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::OutputStreams
+    WSMan OutputStreams node handling.
+    """
+    xmlns = 'rsp'
+    
+    def __init__(self):
+        """
+        Initialize an OutputStreams node with default stdout and stderr streams.
+        """
+        # Call parent constructor with stream specification
+        super().__init__("stdout stderr")
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    OutputStreams;
-
-use parent
-    'Node';
-
-use constant    xmlns   => 'rsp';
-
-sub new {
-    my ($class) = @_;
-
-    my $self = $class->SUPER::new("stdout stderr");
-
-    bless $self, $class;
-
-    return $self;
-}
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.

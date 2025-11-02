@@ -1,85 +1,102 @@
-package GLPI::Agent::Task::Inventory::Generic::Networks::iLO;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Generic Networks iLO - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+import platform
+from typing import Any, Dict, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_all_lines
+from GLPI.Agent.Tools.Network import get_subnet_address, ip_address_pattern
 
-use English qw(-no_match_vars);
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Network;
-
-our $runMeIfTheseChecksFailed = ['GLPI::Agent::Task::Inventory::Generic::Ipmi::Lan'];
-
-sub isEnabled {
-    return OSNAME eq 'MSWin32' ?
-        canRun("C:\\Program\ Files\\HP\\hponcfg\\hponcfg.exe") :
-        canRun('hponcfg');
-}
-
-sub _parseHponcfg {
-    my (%params) = @_;
-
-    my @lines = getAllLines(%params)
-        or return;
-
-    my $interface = {
-        DESCRIPTION => 'Management Interface - HP iLO',
-        TYPE        => 'ethernet',
-        MANAGEMENT  => 'iLO',
-        STATUS      => 'Down',
-    };
-
-    foreach my $line (@lines) {
-        if ($line =~ /<IP_ADDRESS VALUE="($ip_address_pattern)" ?\/>/) {
-            $interface->{IPADDRESS} = $1 unless $1 eq '0.0.0.0';
+class iLO(InventoryModule):
+    """HP iLO management interface inventory module."""
+    
+    run_me_if_these_checks_failed = ['GLPI.Agent.Task.Inventory.Generic.Ipmi.Lan']
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        if platform.system() == 'Windows':
+            return can_run(r"C:\Program Files\HP\hponcfg\hponcfg.exe")
+        else:
+            return can_run('hponcfg')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        command = (
+            r'"c:\Program Files\HP\hponcfg\hponcfg" /a /w output.txt >nul 2>&1 && type output.txt'
+            if platform.system() == 'Windows'
+            else 'hponcfg -aw -'
+        )
+        
+        entry = iLO._parse_hponcfg(logger=logger, command=command)
+        
+        if inventory:
+            inventory.add_entry(
+                section='NETWORKS',
+                entry=entry
+            )
+    
+    @staticmethod
+    def _parse_hponcfg(**params) -> Dict[str, Any]:
+        """Parse hponcfg output."""
+        lines = get_all_lines(**params)
+        if not lines:
+            return {}
+        
+        interface = {
+            'DESCRIPTION': 'Management Interface - HP iLO',
+            'TYPE': 'ethernet',
+            'MANAGEMENT': 'iLO',
+            'STATUS': 'Down',
         }
-        if ($line =~ /<SUBNET_MASK VALUE="($ip_address_pattern)" ?\/>/) {
-            $interface->{IPMASK} = $1;
-        }
-        if ($line =~ /<GATEWAY_IP_ADDRESS VALUE="($ip_address_pattern)"\/>/) {
-            $interface->{IPGATEWAY} = $1;
-        }
-        if ($line =~ /<NIC_SPEED VALUE="([0-9]+)" ?\/>/) {
-            $interface->{SPEED} = $1;
-        }
-        if ($line =~ /<ENABLE_NIC VALUE="Y" ?\/>/) {
-            $interface->{STATUS} = 'Up';
-        }
-        if ($line =~ /not found/) {
-            chomp $line;
-            $params{logger}->error("error in hponcfg output: $line")
-                if $params{logger};
-        }
-    }
-    $interface->{IPSUBNET} = getSubnetAddress(
-        $interface->{IPADDRESS}, $interface->{IPMASK}
-    );
-
-    return $interface;
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $command = OSNAME eq 'MSWin32' ?
-        '"c:\Program Files\HP\hponcfg\hponcfg" /a /w output.txt >nul 2>&1 && type output.txt' :
-        'hponcfg -aw -';
-
-
-    my $entry = _parseHponcfg(
-        logger => $logger,
-        command => $command
-    );
-
-    $inventory->addEntry(
-        section => 'NETWORKS',
-        entry   => $entry
-    );
-}
-
-1;
+        
+        logger = params.get('logger')
+        
+        for line in lines:
+            # IP Address
+            match = re.search(rf'<IP_ADDRESS VALUE="({ip_address_pattern()})" ?/>', line)
+            if match:
+                ip = match.group(1)
+                if ip != '0.0.0.0':
+                    interface['IPADDRESS'] = ip
+            
+            # Subnet Mask
+            match = re.search(rf'<SUBNET_MASK VALUE="({ip_address_pattern()})" ?/>', line)
+            if match:
+                interface['IPMASK'] = match.group(1)
+            
+            # Gateway
+            match = re.search(rf'<GATEWAY_IP_ADDRESS VALUE="({ip_address_pattern()})"/>', line)
+            if match:
+                interface['IPGATEWAY'] = match.group(1)
+            
+            # NIC Speed
+            match = re.search(r'<NIC_SPEED VALUE="([0-9]+)" ?/>', line)
+            if match:
+                interface['SPEED'] = match.group(1)
+            
+            # Enable NIC
+            if re.search(r'<ENABLE_NIC VALUE="Y" ?/>', line):
+                interface['STATUS'] = 'Up'
+            
+            # Error detection
+            if 'not found' in line:
+                if logger:
+                    logger.error(f"error in hponcfg output: {line.strip()}")
+        
+        if interface.get('IPADDRESS'):
+            interface['IPSUBNET'] = get_subnet_address(
+                interface['IPADDRESS'],
+                interface.get('IPMASK')
+            )
+        
+        return interface

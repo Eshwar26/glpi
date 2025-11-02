@@ -1,23 +1,20 @@
-package GLPI::Agent::SOAP::WsMan::CommandResponse;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
 
-use GLPI::Agent::SOAP::WsMan::Node;
+class CommandResponse(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::CommandResponse
+    WSMan CommandResponse node handling.
+    """
+    xmlns = 'rsp'
 
-## no critic (ProhibitMultiplePackages)
-package
-    CommandResponse;
+    @staticmethod
+    def support():
+        return {
+            'CommandId': "rsp:CommandId",
+        }
 
-use parent
-    'Node';
 
-use constant    xmlns   => 'rsp';
-
-sub support {
-    return {
-        CommandId   => "rsp:CommandId",
-    };
-}
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.

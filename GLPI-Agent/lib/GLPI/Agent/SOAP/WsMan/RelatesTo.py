@@ -1,17 +1,13 @@
-package GLPI::Agent::SOAP::WsMan::RelatesTo;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
+class RelatesTo(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::RelatesTo
+    WSMan RelatesTo node handling.
+    """
+    xmlns = 'a'
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    RelatesTo;
-
-use parent
-    'Node';
-
-use constant xmlns  => 'a';
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.

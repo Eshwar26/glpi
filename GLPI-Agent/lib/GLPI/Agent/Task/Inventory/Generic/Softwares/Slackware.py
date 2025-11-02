@@ -1,43 +1,55 @@
-package GLPI::Agent::Task::Inventory::Generic::Softwares::Slackware;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Generic Softwares Slackware - Python Implementation
+"""
 
-use strict;
-use warnings;
+import os
+import re
+from typing import Any
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run
 
-use GLPI::Agent::Tools;
 
-sub isEnabled {
-    return canRun('pkgtool');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $handle = getDirectoryHandle(
-        directory => '/var/log/packages', logger => $logger
-    );
-    return unless $handle;
-
-    while (my $file = readdir($handle)) {
-        next unless $file =~ /^(.+)-(.+)-(i[0-9]86|noarch|x86_64|x86|fw|npmjs)-(.*)$/;
-        my $name = $1;
-        my $version = $2;
-        my $arch = $3;
-
-        $inventory->addEntry(
-            section => 'SOFTWARES',
-            entry   => {
-                NAME    => $name,
-                VERSION => $version,
-                ARCH    => $arch
-            }
-        );
-    }
-    closedir $handle;
-}
-
-1;
+class Slackware(InventoryModule):
+    """Slackware package inventory module."""
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('pkgtool')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        directory = '/var/log/packages'
+        
+        try:
+            if not os.path.isdir(directory):
+                return
+            
+            for file in os.listdir(directory):
+                match = re.match(
+                    r'^(.+)-(.+)-(i[0-9]86|noarch|x86_64|x86|fw|npmjs)-(.*)$',
+                    file
+                )
+                if not match:
+                    continue
+                
+                name, version, arch = match.group(1), match.group(2), match.group(3)
+                
+                if inventory:
+                    inventory.add_entry(
+                        section='SOFTWARES',
+                        entry={
+                            'NAME': name,
+                            'VERSION': version,
+                            'ARCH': arch
+                        }
+                    )
+        except (OSError, PermissionError) as e:
+            if logger:
+                logger.debug(f"Error reading {directory}: {e}")

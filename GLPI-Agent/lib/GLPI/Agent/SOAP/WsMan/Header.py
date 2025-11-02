@@ -1,31 +1,34 @@
-package GLPI::Agent::SOAP::WsMan::Header;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
+class Header(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::Header
+    WSMan Header node handling.
+    """
+    xmlns = 's'
+    
+    @staticmethod
+    def support():
+        return {
+            'Action': "a:Action",
+            'RelatesTo': "a:RelatesTo",
+            'OperationID': "p:OperationID",
+        }
+    
+    def action(self, header=None):
+        """
+        Get the Action node from the header.
+        
+        Args:
+            header: Optional header parameter (not used in implementation)
+            
+        Returns:
+            str or Node: The Action node, or empty string if not found
+        """
+        action_node = self.get('Action')
+        return action_node if action_node else ''
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    Header;
-
-use parent
-    'Node';
-
-use constant    xmlns   => 's';
-
-sub support {
-    return {
-        Action      => "a:Action",
-        RelatesTo   => "a:RelatesTo",
-        OperationID => "p:OperationID",
-    };
-}
-
-sub action {
-    my ($self, $header) = @_;
-
-    return $self->get('Action') // '';
-}
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.

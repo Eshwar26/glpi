@@ -1,233 +1,267 @@
-package GLPI::Agent::Task::Inventory::Linux::Drives;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Linux Drives - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, List, Dict
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_all_lines, get_first_match, get_last_line, trim_whitespace, Glob, get_first_line, month
+from GLPI.Agent.Tools.Unix import get_filesystems_from_df
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Unix;
 
-use constant    category    => "drive";
-
-sub isEnabled {
-    return
-        canRun('df') ||
-        canRun('lshal');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    foreach my $filesystem (_getFilesystems($logger)) {
-        $inventory->addEntry(
-            section => 'DRIVES',
-            entry   => $filesystem
-        );
-    }
-}
-
-sub _getFilesystems {
-    my ($logger) = @_;
-
-    # get filesystems list
-    my @filesystems =
-        # exclude virtual file systems and overlay fs defined by docker
-        grep { $_->{FILESYSTEM} !~ /^(tmpfs|devtmpfs|usbfs|proc|devpts|devshm|udev)$/ && $_->{VOLUMN} !~ /^overlay$/ }
-        # get all file systems
-        getFilesystemsFromDf(logger => $logger, command => 'df -P -T -k');
-
-    # get additional informations
-    if (canRun('blkid')) {
-        # use blkid if available, as it is filesystem-independent
-        foreach my $filesystem (@filesystems) {
-            $filesystem->{SERIAL} = getFirstMatch(
-                logger  => $logger,
-                command => "blkid -w /dev/null $filesystem->{VOLUMN}",
-                pattern => qr/\sUUID="(\S*)"\s/
-            );
-        }
-    }
-
-    # Anyway attempt to get details with filesystem-dependant utilities
-    my $has_dumpe2fs   = canRun('dumpe2fs');
-    my $has_xfs_db     = canRun('xfs_db');
-    my $has_fatlabel   = canRun('fatlabel');
-    my $has_dosfslabel = $has_fatlabel ? 0 : canRun('dosfslabel');
-
-    foreach my $filesystem (@filesystems) {
-        if ($filesystem->{FILESYSTEM} =~ /^ext(2|3|4|4dev)/ && $has_dumpe2fs) {
-            my @lines = getAllLines(
-                logger => $logger,
-                command => "dumpe2fs -h $filesystem->{VOLUMN}"
-            );
-            next unless @lines;
-            foreach my $line (@lines) {
-                if ($line =~ /Filesystem UUID:\s+(\S+)/) {
-                    $filesystem->{SERIAL} = $1
-                        unless $filesystem->{SERIAL};
-                } elsif ($line =~ /Filesystem created:\s+\w+\s+(\w+)\s+(\d+)\s+([\d:]+)\s+(\d{4})$/) {
-                    $filesystem->{CREATEDATE} = sprintf("%s/%02d/%02d %s", $4, month($1), $2, $3);
-                } elsif ($line =~ /Filesystem volume name:\s*(\S.*)/) {
-                    $filesystem->{LABEL} = $1 unless $1 eq '<none>';
-                }
-            }
-            next;
-        }
-
-        if ($filesystem->{FILESYSTEM} eq 'xfs' && $has_xfs_db) {
-            unless ($filesystem->{SERIAL}) {
-                $filesystem->{SERIAL} = getFirstMatch(
-                    logger  => $logger,
-                    command => "xfs_db -r -c uuid $filesystem->{VOLUMN}",
-                    pattern => qr/^UUID =\s+(\S+)/
-                );
-            }
-            $filesystem->{LABEL} = getFirstMatch(
-                logger  => $logger,
-                command => "xfs_db -r -c label $filesystem->{VOLUMN}",
-                pattern => qr/^label =\s+"(\S+)"/
-            );
-            next;
-        }
-
-        if ($filesystem->{FILESYSTEM} eq 'vfat' && ($has_fatlabel || $has_dosfslabel)) {
-            my $label = getLastLine(
-                logger  => $logger,
-                command => ($has_fatlabel ? "fatlabel" : "dosfslabel")." ".$filesystem->{VOLUMN}
-            );
-            # Keep label only if last line starts with a non space character
-            $filesystem->{LABEL} = trimWhitespace($label)
-                if defined($label) && $label =~ /^\S/;
-            next;
-        }
-    }
-
-    # complete with hal if available
-    if (canRun('lshal')) {
-        my @hal_filesystems = _getFilesystemsFromHal();
-        my %hal_filesystems = map { $_->{VOLUMN} => $_ } @hal_filesystems;
-
-        foreach my $filesystem (@filesystems) {
-            # retrieve hal informations for this drive
-            my $hal_filesystem = $hal_filesystems{$filesystem->{VOLUMN}};
-            next unless $hal_filesystem;
-
-            # take hal information if it doesn't exist already
-            foreach my $key (keys %$hal_filesystem) {
-                $filesystem->{$key} = $hal_filesystem->{$key}
-                    if !$filesystem->{$key};
-            }
-        }
-    }
-
-    my %devicemapper = ();
-    my %cryptsetup = ();
-
-    # complete with encryption status if available
-    if (canRun('dmsetup') && canRun('cryptsetup')) {
-        foreach my $filesystem (@filesystems) {
-            # Find dmsetup uuid if available
-            my $uuid = getFirstMatch(
-                logger  => $logger,
-                command => "dmsetup info $filesystem->{VOLUMN}",
-                pattern => qr/^UUID\s*:\s*(.*)$/
-            );
-            next unless $uuid;
-
-            # Find real devicemapper block name
-            unless ($devicemapper{$uuid}) {
-                foreach my $uuidfile (Glob("/sys/block/*/dm/uuid")) {
-                    next unless getFirstLine(file => $uuidfile) eq $uuid;
-                    ($devicemapper{$uuid}) = $uuidfile =~ m|^(/sys/block/[^/]+)|;
-                    last;
-                }
-            }
-            next unless $devicemapper{$uuid};
-
-            # Lookup for crypto devicemapper slaves
-            my @names = grep { defined($_) && length($_) } map {
-                getFirstLine(file => $_)
-            } Glob("$devicemapper{$uuid}/slaves/*/dm/name");
-
-            # Finaly we may try on the device itself, see fusioninventory-agent issue #825
-            push @names, $filesystem->{VOLUMN};
-
-            foreach my $name (@names) {
-                # Check cryptsetup status for the found slave/device
-                unless ($cryptsetup{$name}) {
-                    my @lines = getAllLines(command => "cryptsetup status $name")
-                        or next;
-                    foreach my $line (@lines) {
-                        next unless ($line =~ /^\s*(.*):\s*(.*)$/);
-                        $cryptsetup{$name}->{uc($1)} = $2;
-                    }
-                }
-                next unless $cryptsetup{$name};
-
-                # Add cryptsetup status to filesystem
-                $filesystem->{ENCRYPT_NAME}   = $cryptsetup{$name}->{TYPE};
-                $filesystem->{ENCRYPT_STATUS} = 'Yes';
-                $filesystem->{ENCRYPT_ALGO}   = $cryptsetup{$name}->{CIPHER};
-
-                last;
-            }
-        }
-    }
-
-    return @filesystems;
-}
-
-sub _getFilesystemsFromHal {
-    my $devices = _parseLshal(command => 'lshal');
-    return @$devices;
-}
-
-sub _parseLshal {
-    my (%params) = @_;
-
-    my @lines = getAllLines(%params)
-        or return;
-
-    my $devices = [];
-    my $device = {};
-
-    foreach my $line (@lines) {
-        if ($line =~ m{^udi = '/org/freedesktop/Hal/devices/(volume|block).*}) {
-            $device = {};
-            next;
-        }
-
-        next unless defined $device;
-
-        if ($line =~ /^$/) {
-            if ($device->{ISVOLUME}) {
-                delete($device->{ISVOLUME});
-                push(@$devices, $device);
-            }
-            undef $device;
-        } elsif ($line =~ /^\s+ block.device \s = \s '([^']+)'/x) {
-            $device->{VOLUMN} = $1;
-        } elsif ($line =~ /^\s+ volume.fstype \s = \s '([^']+)'/x) {
-            $device->{FILESYSTEM} = $1;
-        } elsif ($line =~ /^\s+ volume.label \s = \s '([^']+)'/x) {
-            $device->{LABEL} = $1;
-        } elsif ($line =~ /^\s+ volume.uuid \s = \s '([^']+)'/x) {
-            $device->{SERIAL} = $1;
-        } elsif ($line =~ /^\s+ storage.model \s = \s '([^']+)'/x) {
-            $device->{TYPE} = $1;
-         } elsif ($line =~ /^\s+ volume.size \s = \s (\S+)/x) {
-            my $value = $1;
-            $device->{TOTAL} = int($value/(1024*1024) + 0.5);
-        } elsif ($line =~ /block.is_volume\s*=\s*true/i) {
-            $device->{ISVOLUME} = 1;
-        }
-    }
-
-    return $devices;
-}
-
-1;
+class Drives(InventoryModule):
+    """Linux filesystem/drives detection module."""
+    
+    category = "drive"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('df') or can_run('lshal')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        for filesystem in Drives._get_filesystems(logger):
+            if inventory:
+                inventory.add_entry(
+                    section='DRIVES',
+                    entry=filesystem
+                )
+    
+    @staticmethod
+    def _get_filesystems(logger=None) -> List[Dict[str, Any]]:
+        """Get filesystems list with details."""
+        # Get filesystems list excluding virtual filesystems and Docker overlay
+        filesystems = []
+        for fs in get_filesystems_from_df(logger=logger, command='df -P -T -k'):
+            filesystem = fs.get('FILESYSTEM', '')
+            volumn = fs.get('VOLUMN', '')
+            if re.match(r'^(tmpfs|devtmpfs|usbfs|proc|devpts|devshm|udev)$', filesystem):
+                continue
+            if re.match(r'^overlay$', volumn):
+                continue
+            filesystems.append(fs)
+        
+        # Get additional information from blkid if available
+        if can_run('blkid'):
+            for filesystem in filesystems:
+                volumn = filesystem.get('VOLUMN')
+                if volumn:
+                    serial = get_first_match(
+                        logger=logger,
+                        command=f'blkid -w /dev/null {volumn}',
+                        pattern=r'\sUUID="(\S*)"\s'
+                    )
+                    if serial:
+                        filesystem['SERIAL'] = serial
+        
+        # Attempt to get details with filesystem-dependent utilities
+        has_dumpe2fs = can_run('dumpe2fs')
+        has_xfs_db = can_run('xfs_db')
+        has_fatlabel = can_run('fatlabel')
+        has_dosfslabel = False if has_fatlabel else can_run('dosfslabel')
+        
+        for filesystem in filesystems:
+            fs_type = filesystem.get('FILESYSTEM', '')
+            volumn = filesystem.get('VOLUMN', '')
+            
+            # Handle ext2/3/4 filesystems
+            if re.match(r'^ext(2|3|4|4dev)', fs_type) and has_dumpe2fs:
+                lines = get_all_lines(
+                    logger=logger,
+                    command=f'dumpe2fs -h {volumn}'
+                )
+                if lines:
+                    for line in lines:
+                        uuid_match = re.match(r'Filesystem UUID:\s+(\S+)', line)
+                        if uuid_match and not filesystem.get('SERIAL'):
+                            filesystem['SERIAL'] = uuid_match.group(1)
+                        
+                        date_match = re.match(r'Filesystem created:\s+\w+\s+(\w+)\s+(\d+)\s+([\d:]+)\s+(\d{4})$', line)
+                        if date_match:
+                            mon, day, time, year = date_match.groups()
+                            m = month(mon)
+                            if m:
+                                filesystem['CREATEDATE'] = f"{year}/{m:02d}/{int(day):02d} {time}"
+                        
+                        label_match = re.match(r'Filesystem volume name:\s*(\S.*)', line)
+                        if label_match:
+                            label = label_match.group(1)
+                            if label != '<none>':
+                                filesystem['LABEL'] = label
+                continue
+            
+            # Handle XFS filesystems
+            if fs_type == 'xfs' and has_xfs_db:
+                if not filesystem.get('SERIAL'):
+                    serial = get_first_match(
+                        logger=logger,
+                        command=f'xfs_db -r -c uuid {volumn}',
+                        pattern=r'^UUID =\s+(\S+)'
+                    )
+                    if serial:
+                        filesystem['SERIAL'] = serial
+                
+                label = get_first_match(
+                    logger=logger,
+                    command=f'xfs_db -r -c label {volumn}',
+                    pattern=r'^label =\s+"(\S+)"'
+                )
+                if label:
+                    filesystem['LABEL'] = label
+                continue
+            
+            # Handle VFAT filesystems
+            if fs_type == 'vfat' and (has_fatlabel or has_dosfslabel):
+                cmd = 'fatlabel' if has_fatlabel else 'dosfslabel'
+                label = get_last_line(
+                    logger=logger,
+                    command=f'{cmd} {volumn}'
+                )
+                # Keep label only if last line starts with a non-space character
+                if label and re.match(r'^\S', label):
+                    filesystem['LABEL'] = trim_whitespace(label)
+                continue
+        
+        # Complete with hal if available
+        if can_run('lshal'):
+            hal_filesystems = Drives._get_filesystems_from_hal()
+            hal_filesystems_map = {fs['VOLUMN']: fs for fs in hal_filesystems if fs.get('VOLUMN')}
+            
+            for filesystem in filesystems:
+                hal_filesystem = hal_filesystems_map.get(filesystem.get('VOLUMN'))
+                if hal_filesystem:
+                    for key, value in hal_filesystem.items():
+                        if not filesystem.get(key):
+                            filesystem[key] = value
+        
+        # Complete with encryption status if available
+        if can_run('dmsetup') and can_run('cryptsetup'):
+            devicemapper = {}
+            cryptsetup = {}
+            
+            for filesystem in filesystems:
+                volumn = filesystem.get('VOLUMN')
+                if not volumn:
+                    continue
+                
+                # Find dmsetup uuid if available
+                uuid = get_first_match(
+                    logger=logger,
+                    command=f'dmsetup info {volumn}',
+                    pattern=r'^UUID\s*:\s*(.*)$'
+                )
+                if not uuid:
+                    continue
+                
+                # Find real devicemapper block name
+                if uuid not in devicemapper:
+                    for uuidfile in Glob('/sys/block/*/dm/uuid'):
+                        file_uuid = get_first_line(file=uuidfile)
+                        if file_uuid == uuid:
+                            dm_match = re.match(r'^(/sys/block/[^/]+)', uuidfile)
+                            if dm_match:
+                                devicemapper[uuid] = dm_match.group(1)
+                                break
+                
+                if uuid not in devicemapper:
+                    continue
+                
+                # Lookup for crypto devicemapper slaves
+                names = []
+                for name_file in Glob(f"{devicemapper[uuid]}/slaves/*/dm/name"):
+                    name = get_first_line(file=name_file)
+                    if name:
+                        names.append(name)
+                
+                # Finally we may try on the device itself
+                names.append(volumn)
+                
+                for name in names:
+                    # Check cryptsetup status for the found slave/device
+                    if name not in cryptsetup:
+                        lines = get_all_lines(command=f'cryptsetup status {name}')
+                        if lines:
+                            cryptsetup[name] = {}
+                            for line in lines:
+                                match = re.match(r'^\s*(.*):\s*(.*)$', line)
+                                if match:
+                                    cryptsetup[name][match.group(1).upper()] = match.group(2)
+                    
+                    if name not in cryptsetup:
+                        continue
+                    
+                    # Add cryptsetup status to filesystem
+                    filesystem['ENCRYPT_NAME'] = cryptsetup[name].get('TYPE')
+                    filesystem['ENCRYPT_STATUS'] = 'Yes'
+                    filesystem['ENCRYPT_ALGO'] = cryptsetup[name].get('CIPHER')
+                    break
+        
+        return filesystems
+    
+    @staticmethod
+    def _get_filesystems_from_hal() -> List[Dict[str, Any]]:
+        """Get filesystems from HAL."""
+        return Drives._parse_lshal(command='lshal')
+    
+    @staticmethod
+    def _parse_lshal(**params) -> List[Dict[str, Any]]:
+        """Parse lshal output."""
+        lines = get_all_lines(**params)
+        if not lines:
+            return []
+        
+        devices = []
+        device = {}
+        
+        for line in lines:
+            if re.match(r"^udi = '/org/freedesktop/Hal/devices/(volume|block)", line):
+                device = {}
+                continue
+            
+            if device is None:
+                continue
+            
+            if re.match(r'^$', line):
+                if device.get('ISVOLUME'):
+                    del device['ISVOLUME']
+                    devices.append(device)
+                device = None
+            elif re.search(r'^\s+ block.device \s = \s \'([^\']+)\'', line, re.VERBOSE):
+                match = re.search(r"'([^']+)'", line)
+                if match:
+                    device['VOLUMN'] = match.group(1)
+            elif re.search(r'^\s+ volume.fstype \s = \s \'([^\']+)\'', line, re.VERBOSE):
+                match = re.search(r"'([^']+)'", line)
+                if match:
+                    device['FILESYSTEM'] = match.group(1)
+            elif re.search(r'^\s+ volume.label \s = \s \'([^\']+)\'', line, re.VERBOSE):
+                match = re.search(r"'([^']+)'", line)
+                if match:
+                    device['LABEL'] = match.group(1)
+            elif re.search(r'^\s+ volume.uuid \s = \s \'([^\']+)\'', line, re.VERBOSE):
+                match = re.search(r"'([^']+)'", line)
+                if match:
+                    device['SERIAL'] = match.group(1)
+            elif re.search(r'^\s+ storage.model \s = \s \'([^\']+)\'', line, re.VERBOSE):
+                match = re.search(r"'([^']+)'", line)
+                if match:
+                    device['TYPE'] = match.group(1)
+            elif re.search(r'^\s+ volume.size \s = \s (\S+)', line, re.VERBOSE):
+                match = re.search(r'= \s (\S+)', line, re.VERBOSE)
+                if match:
+                    try:
+                        value = int(match.group(1))
+                        device['TOTAL'] = int(value / (1024 * 1024) + 0.5)
+                    except (ValueError, TypeError):
+                        pass
+            elif re.search(r'block.is_volume\s*=\s*true', line, re.IGNORECASE):
+                device['ISVOLUME'] = True
+        
+        return devices

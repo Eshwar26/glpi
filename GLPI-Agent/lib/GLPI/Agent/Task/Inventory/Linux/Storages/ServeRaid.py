@@ -1,91 +1,85 @@
-package GLPI::Agent::Task::Inventory::Linux::Storages::ServeRaid;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Linux Storages ServeRaid - Python Implementation
 
-use strict;
-use warnings;
+Tested on 2.6.* kernels
+Cards tested: IBM ServeRAID-6M, IBM ServeRAID-6i
+"""
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+import re
+from typing import Any
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Task::Inventory::Linux::Storages;
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_all_lines, get_canonical_manufacturer
 
-# Tested on 2.6.* kernels
-#
-# Cards tested :
-#
-# IBM ServeRAID-6M
-# IBM ServeRAID-6i
 
-sub isEnabled {
-    return canRun('ipssend');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my @lines = getAllLines(
-        logger  => $logger,
-        command => 'ipssend GETVERSION'
-    );
-    return unless @lines;
-
-    foreach my $line (@lines) {
-
-# Example Output :
-# Found 1 IBM ServeRAID controller(s).
-#----------------------------------------------------------------------
-#ServeRAID Controller(s) Version Information
-#----------------------------------------------------------------------
-#   Controlling BIOS version       : 7.00.14
-        #
-#ServeRAID Controller Number 1
-#   Controller type                : ServeRAID-6M
-#   Controller slot information    : 2
-#   Actual BIOS version            : 7.00.14
-#   Firmware version               : 7.00.14
-#   Device driver version          : 7.10.18
-        next unless $line =~ /ServeRAID Controller Number\s(\d*)/;
-        my $slot = $1;
-
-        my $storage;
-        my @config_lines = getAllLines(
-            logger  => $logger,
-            command => "ipssend GETCONFIG $slot PD"
-        );
-        next unless @config_lines;
-
-        foreach my $line2 (@config_lines) {
-# Example Output :
-#   Channel #1:
-#      Target on SCSI ID 0
-#         Device is a Hard disk
-#         SCSI ID                  : 0
-#         PFA (Yes/No)             : No
-#         State                    : Online (ONL)
-#         Size (in MB)/(in sectors): 34715/71096368
-#         Device ID                : IBM-ESXSCBR036C3DFQDB2Q6CDKM
-#         FRU part number          : 32P0729
-
-            if ($line2 =~ /Size.*:\s(\d*)\/(\d*)/) {
-                $storage->{DISKSIZE} = $1;
-            } elsif ($line2 =~ /Device ID.*:\s(.*)/) {
-                $storage->{SERIALNUMBER} = $1;
-            } elsif ($line2 =~ /FRU part number.*:\s(.*)/) {
-                $storage->{MODEL} = $1;
-                $storage->{MANUFACTURER} = getCanonicalManufacturer(
-                    $storage->{SERIALNUMBER}
-                );
-                $storage->{NAME} = $storage->{MANUFACTURER} . ' ' . $storage->{MODEL};
-                $storage->{DESCRIPTION} = 'SCSI';
-                $storage->{TYPE} = 'disk';
-
-                $inventory->addEntry(section => 'STORAGES', entry => $storage);
-                undef $storage;
-            }
-        }
-    }
-}
-
-1;
+class ServeRaid(InventoryModule):
+    """IBM ServeRAID controller inventory."""
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('ipssend')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        lines = get_all_lines(
+            logger=logger,
+            command='ipssend GETVERSION'
+        )
+        if not lines:
+            return
+        
+        for line in lines:
+            # Example Output:
+            # Found 1 IBM ServeRAID controller(s).
+            # ServeRAID Controller Number 1
+            #   Controller type                : ServeRAID-6M
+            match = re.search(r'ServeRAID Controller Number\s(\d*)', line)
+            if not match:
+                continue
+            
+            slot = match.group(1)
+            
+            config_lines = get_all_lines(
+                logger=logger,
+                command=f'ipssend GETCONFIG {slot} PD'
+            )
+            if not config_lines:
+                continue
+            
+            storage = {}
+            for line2 in config_lines:
+                # Example Output:
+                #   Channel #1:
+                #      Target on SCSI ID 0
+                #         Device is a Hard disk
+                #         Size (in MB)/(in sectors): 34715/71096368
+                #         Device ID                : IBM-ESXSCBR036C3DFQDB2Q6CDKM
+                #         FRU part number          : 32P0729
+                
+                size_match = re.search(r'Size.*:\s(\d*)/(\d*)', line2)
+                if size_match:
+                    storage['DISKSIZE'] = int(size_match.group(1))
+                
+                device_id_match = re.search(r'Device ID.*:\s(.*)', line2)
+                if device_id_match:
+                    storage['SERIALNUMBER'] = device_id_match.group(1).strip()
+                
+                fru_match = re.search(r'FRU part number.*:\s(.*)', line2)
+                if fru_match:
+                    storage['MODEL'] = fru_match.group(1).strip()
+                    storage['MANUFACTURER'] = get_canonical_manufacturer(
+                        storage.get('SERIALNUMBER', '')
+                    )
+                    storage['NAME'] = f"{storage['MANUFACTURER']} {storage['MODEL']}"
+                    storage['DESCRIPTION'] = 'SCSI'
+                    storage['TYPE'] = 'disk'
+                    
+                    if inventory:
+                        inventory.add_entry(section='STORAGES', entry=storage)
+                    storage = {}

@@ -1,38 +1,23 @@
-package GLPI::Agent::SOAP::WsMan::Attribute;
+from typing import Any, Dict, List, Optional
 
-use strict;
-use warnings;
 
-## no critic (ProhibitMultiplePackages)
-package
-    Attribute;
+class Attribute:
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::Attribute
+    WSMan Attribute handling.
+    """
 
-sub new {
-    my ($class, %params) = @_;
+    def __init__(self, **params: Any):
+        self._params = params
 
-    my $self = \%params;
+    def get(self, key: Optional[str] = None) -> Any:
+        if key:
+            return self._params.get(key)
+        attributes = []
+        for k, v in self._params.items():
+            attributes.extend([f"-{k}", v])
+        return attributes
 
-    bless $self, $class;
-    return $self;
-}
-
-sub get {
-    my ($self, $key) = @_;
-
-    return $self->{$key} if $key;
-
-    my @attributes;
-    foreach my $key (keys(%{$self})) {
-        push @attributes, "-$key", $self->{$key};
-    }
-
-    return \@attributes;
-}
-
-sub must_understand {
-    my ($class, $bool) = @_;
-
-    return $class->new("s:mustUnderstand" => $bool // "true");
-}
-
-1;
+    @classmethod
+    def must_understand(cls, value: Optional[bool] = None) -> 'Attribute':
+        return cls(s_mustUnderstand=value if value is not None else "true")

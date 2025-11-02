@@ -1,54 +1,56 @@
-package GLPI::Agent::Task::Inventory::HPUX::Slots;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory HPUX Slots - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any, List, Dict
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_all_lines
 
-use GLPI::Agent::Tools;
 
-use constant    category    => "slot";
-
-sub isEnabled {
-    return canRun('ioscan');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    foreach my $type (qw/ioa ba/) {
-        foreach my $slot (_getSlots(
-            command => "ioscan -kFC $type",
-            logger  => $logger
-        )) {
-            $inventory->addEntry(
-                section => 'SLOTS',
-                entry   => $slot
-            );
-        }
-    }
-}
-
-sub _getSlots {
-    my (%params) = @_;
-
-    my @lines = getAllLines(%params)
-        or return;
-
-    my @slots;
-    foreach my $line (@lines) {
-        my @info = split(/:/, $line);
-        push @slots, {
-            NAME        => $info[9].$info[10],
-            DESIGNATION => $info[13],
-            DESCRIPTION => $info[17],
-        };
-    }
-
-    return @slots;
-}
-
-1;
+class Slots(InventoryModule):
+    """HP-UX slots detection module."""
+    
+    category = "slot"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('ioscan')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        for slot_type in ['ioa', 'ba']:
+            for slot in Slots._get_slots(
+                command=f"ioscan -kFC {slot_type}",
+                logger=logger
+            ):
+                if inventory:
+                    inventory.add_entry(
+                        section='SLOTS',
+                        entry=slot
+                    )
+    
+    @staticmethod
+    def _get_slots(**params) -> List[Dict[str, str]]:
+        """Parse ioscan output for slots."""
+        lines = get_all_lines(**params)
+        if not lines:
+            return []
+        
+        slots = []
+        for line in lines:
+            info = line.split(':')
+            if len(info) > 17:
+                slots.append({
+                    'NAME': f"{info[9]}{info[10]}",
+                    'DESIGNATION': info[13],
+                    'DESCRIPTION': info[17],
+                })
+        
+        return slots

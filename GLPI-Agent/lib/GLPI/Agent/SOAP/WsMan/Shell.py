@@ -1,66 +1,74 @@
-package GLPI::Agent::SOAP::WsMan::Shell;
 
-use strict;
-use warnings;
+import re
 
-use GLPI::Agent::SOAP::WsMan::Node;
+class Shell(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::Shell
+    Handles WSMan Shell node operations.
+    """
+    xmlns = 'rsp'
+    xsd = "http://schemas.microsoft.com/wbem/wsman/1/windows/shell"
 
-## no critic (ProhibitMultiplePackages)
-package
-    Shell;
+    @classmethod
+    def support(cls):
+        """
+        Returns supported WSMan selectors.
 
-use parent
-    'Node';
+        Returns:
+            dict: Supported element mappings.
+        """
+        return {
+            'Selector': 'w:Selector',
+        }
 
-use GLPI::Agent::SOAP::WsMan::Attribute;
-use GLPI::Agent::SOAP::WsMan::InputStreams;
-use GLPI::Agent::SOAP::WsMan::OutputStreams;
-use GLPI::Agent::SOAP::WsMan::CommandLine;
-use GLPI::Agent::SOAP::WsMan::Command;
-use GLPI::Agent::SOAP::WsMan::Arguments;
+    def __init__(self, *params):
+        """
+        Initialize a Shell node.
 
-use constant    xmlns   => 'rsp';
-use constant    xsd     => "http://schemas.microsoft.com/wbem/wsman/1/windows/shell";
+        Args:
+            *params: Optional parameters for initialization (like Perl @params).
+        """
+        # Perl:
+        # if $params[0] is a HASH ref and contains 'rsp:ResourceUri', fix case
+        if params and isinstance(params[0], dict):
+            if 'rsp:ResourceUri' in params[0]:
+                params[0]['rsp:ResourceURI'] = params[0].pop('rsp:ResourceUri')
 
-sub support {
-    return {
-        Selector    => "w:Selector",
-    };
-}
+        # Call the parent Node constructor
+        super().__init__(*params)
 
-sub new {
-    my ($class, @params) = @_;
+        # Perl: add attributes if no parameters are passed
+        if not params:
+            self.push(
+                Attribute(f"xmlns:{self.xmlns}", self.xsd),
+                InputStreams(),
+                OutputStreams()
+            )
 
-    # For some reasons, remote answers with wrong case on ResourceURI when remote is done from windows
-    $params[0]->{'rsp:ResourceURI'} = delete $params[0]->{'rsp:ResourceUri'}
-        if $params[0] && ref($params[0]) eq 'HASH' && exists($params[0]->{'rsp:ResourceUri'});
+    def commandline(self, command):
+        """
+        Create and return a CommandLine node from a shell command string.
 
-    my $self = $class->SUPER::new(@params);
+        Args:
+            command (str): The command string to parse.
 
-    $self->push(
-        Attribute->new("xmlns:".$class->xmlns => xsd),
-        InputStreams->new(),
-        OutputStreams->new()
-    ) unless @params;
+        Returns:
+            CommandLine: A CommandLine node with Command and optional Arguments.
+        """
+        # Perl regex: my ($cmd, $args) = $command =~ /^\s*(\S+)\s*(.*)$/;
+        match = re.match(r"^\s*(\S+)\s*(.*)$", command)
+        if not match:
+            return None
+        cmd, args = match.groups()
 
-    bless $self, $class;
+        # Create CommandLine -> Command
+        cmdline = CommandLine(
+            Attribute(self.namespace()),
+            Command(cmd)
+        )
 
-    return $self;
-}
+        # Add Arguments if present
+        if args and len(args.strip()) > 0:
+            cmdline.push(Arguments(args))
 
-sub commandline {
-    my ($self, $command) = @_;
-
-    my ($cmd, $args) = $command =~ /^\s*(\S+)\s*(.*)$/;
-
-    my $cmdline = CommandLine->new(
-        Attribute->new( $self->namespace ),
-        Command->new($cmd),
-    );
-    $cmdline->push(Arguments->new($args))
-        if defined($args) && length($args);
-
-    return $cmdline;
-}
-
-1;
+        return cmdline

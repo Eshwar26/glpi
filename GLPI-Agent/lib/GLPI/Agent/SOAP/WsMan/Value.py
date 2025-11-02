@@ -1,17 +1,24 @@
-package GLPI::Agent::SOAP::WsMan::Value;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
+class To(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::To
+    WSMan To node handling.
+    """
+    xmlns = 'a'
+    xsd = "http://schemas.xmlsoap.org/ws/2004/08/addressing"
+    
+    @classmethod
+    def anonymous(cls):
+        """
+        Create a To node with an anonymous address.
+        
+        Returns:
+            To: A new To instance with the anonymous addressing role URI
+        """
+        return cls("http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous")
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    Value;
-
-use parent
-    'Node';
-
-use constant xmlns  => 's';
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns and xsd are class attributes.

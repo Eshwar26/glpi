@@ -1,32 +1,27 @@
-package GLPI::Agent::SOAP::WsMan::DesiredStream;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
+# from glpi.agent.soap.wsman.attribute import Attribute
 
-use strict;
-use warnings;
+class DesiredStream(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::DesiredStream
+    WSMan DesiredStream node handling.
+    """
+    xmlns = 'rsp'
+    
+    def __init__(self, cid):
+        """
+        Initialize a DesiredStream node with CommandId and stream specification.
+        
+        Args:
+            cid: The Command ID
+        """
+        # Call parent constructor with Attribute and stream specification
+        super().__init__(
+            Attribute(CommandId=cid),
+            "stdout stderr"
+        )
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    DesiredStream;
-
-use parent
-    'Node';
-
-use GLPI::Agent::SOAP::WsMan::Attribute;
-
-use constant    xmlns   => 'rsp';
-
-sub new {
-    my ($class, $cid) = @_;
-
-    my $self = $class->SUPER::new(
-        Attribute->new( CommandId => $cid ),
-        "stdout stderr",
-    );
-
-    bless $self, $class;
-
-    return $self;
-}
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.

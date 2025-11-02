@@ -1,42 +1,32 @@
-package GLPI::Agent::SOAP::WsMan::Code;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
 
-use GLPI::Agent::SOAP::WsMan::Node;
+class Code(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::Code
+    WSMan Code node handling.
+    """
 
-## no critic (ProhibitMultiplePackages)
-package
-    Code;
+    @staticmethod
+    def support():
+        return {
+            'Value': 's:Value',
+        }
 
-use parent
-    'Node';
+    def xmlns(self):
+        return 'rsp' if hasattr(self, '_signal') and self._signal else 's'
 
-sub support {
-    return {
-        Value   => "s:Value",
-    };
-}
+    @classmethod
+    def signal(cls, signal: str):
+        code_map = {
+            'terminate': "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/signal/terminate",
+        }
+        if signal not in code_map:
+            return None
+        new_instance = cls(code_map[signal])
+        new_instance._signal = True
+        return new_instance
 
-sub xmlns {
-    my ($self) = @_;
-
-    return $self->{_signal} ? 'rsp' : 's';
-}
-
-sub signal {
-    my ($class, $signal) = @_;
-
-    my %code = (
-        terminate   => "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/signal/terminate",
-    );
-
-    return unless $code{$signal};
-
-    my $new = $class->new($code{$signal});
-    $new->{_signal} = 1;
-
-    return $new;
-}
-
-1;
+    def __init__(self, code: str):
+        super().__init__(code)

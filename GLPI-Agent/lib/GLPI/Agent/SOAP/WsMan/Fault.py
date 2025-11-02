@@ -1,49 +1,59 @@
-package GLPI::Agent::SOAP::WsMan::Fault;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
+# from glpi.agent.soap.wsman.reason import Reason
 
-use strict;
-use warnings;
+class Fault(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::Fault
+    WSMan Fault node handling.
+    """
+    xmlns = 's'
+    
+    @staticmethod
+    def support():
+        return {
+            'Reason': "s:Reason",
+            'Code': "s:Code",
+        }
+    
+    def reason(self):
+        """
+        Get the Reason node from the fault.
+        
+        Returns:
+            Reason: The reason node, or a new one if not found
+        """
+        reason_node = self.get('Reason')
+        
+        return reason_node if reason_node else Reason()
+    
+    def errorCode(self):
+        """
+        Extract the error code from the fault detail.
+        
+        Returns:
+            str or int: The error code, or 0 if not found
+        """
+        code = None
+        
+        detail = self.get('Detail')
+        
+        if detail:
+            # Try to get WMI error first
+            wmierror = detail.get('MSFT_WmiError_Type')
+            if wmierror:
+                error_code_node = wmierror.get('error_Code')
+                if error_code_node:
+                    code = error_code_node.string()
+            
+            # If no WMI error, try WSManFault
+            if not code:
+                wsmanerror = detail.get('WSManFault')
+                if wsmanerror:
+                    code = wsmanerror.attribute('Code')
+        
+        return code if code else 0
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    Fault;
-
-use parent
-    'Node';
-
-use constant    xmlns   => 's';
-
-sub support {
-    return {
-        Reason  => "s:Reason",
-        Code    => "s:Code",
-    };
-}
-
-sub reason {
-    my ($self) = @_;
-
-    my ($reason) = $self->get('Reason');
-
-    return $reason // Reason->new();
-}
-
-sub errorCode {
-    my ($self) = @_;
-
-    my $code;
-
-    my $detail = $self->get('Detail');
-
-    my $wmierror = $detail->get('MSFT_WmiError_Type');
-    $code = $wmierror->get('error_Code')->string if $wmierror;
-
-    my $wsmanerror;
-    $wsmanerror = $detail->get('WSManFault') unless $code;
-    $code = $wsmanerror->attribute('Code') if $wsmanerror;
-
-    return $code // 0;
-}
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.

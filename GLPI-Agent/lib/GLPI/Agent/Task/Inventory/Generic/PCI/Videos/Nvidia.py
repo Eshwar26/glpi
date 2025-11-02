@@ -1,152 +1,203 @@
-package GLPI::Agent::Task::Inventory::Generic::PCI::Videos::Nvidia;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Generic PCI Videos Nvidia - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, Dict, List, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
-
-use English qw(-no_match_vars);
-
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Generic;
-
-use constant    category    => "video";
-
-sub isEnabled {
-    return
-        canRun('nvidia-settings');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $videos = $inventory->getSection('VIDEOS') || [];
-
-    foreach my $video (_getNvidiaVideos(logger => $logger)) {
-        my ($current) = grep { _samePciSlot($_->{PCISLOT}, $video->{PCISLOT} // '') } @{$videos};
-        if ($current) {
-            $current->{NAME} = $video->{NAME} unless $current->{NAME} || !$video->{NAME};
-            $current->{MEMORY} = $video->{MEMORY} if $video->{MEMORY};
-            $current->{CHIPSET} = $video->{CHIPSET} unless $current->{CHIPSET};
-            $current->{RESOLUTION} = $video->{RESOLUTION} if $video->{RESOLUTION};
-        } else {
-            $inventory->addEntry(
-                section => 'VIDEOS',
-                entry   => $video
-            );
-        }
-    }
-}
-
-my $pcislot_re = qr/^(?:([0-9a-f]+):)?([0-9a-f]{2}):([0-9a-f]{2})\.([0-9a-f]+)$/i;
-sub _samePciSlot {
-    my ($first, $second) = @_;
-
-    my @first  = $first  =~ $pcislot_re;
-    my @second = $second =~ $pcislot_re;
-
-    return hex($first[0] // 0) == hex($second[0] // 0)
-        && hex($first[1]) == hex($second[1])
-        && hex($first[2]) == hex($second[2])
-        && hex($first[3]) == hex($second[3]) ? 1 : 0;
-}
-
-sub _updatePci {
-    my ($hash) = @_;
-
-    my $dom  = delete $hash->{PCIDOMAIN};
-    my $bus  = delete $hash->{PCIBUS};
-    my $dev  = delete $hash->{PCIDEVICE};
-    my $func = delete $hash->{PCIFUNC};
-    $hash->{PCISLOT} = sprintf("%02x:%02x.%x", $bus, $dev, $func)
-        if defined($bus) && defined($dev) && defined($func);
-    $hash->{PCISLOT} = sprintf("%04x:%s", $dom, $hash->{PCISLOT})
-        if $dom;
-
-    return $hash;
-}
-
-sub _getNvidiaGpus {
-    my (%params) = (
-        command => "nvidia-settings -t -c all -q gpus",
-        @_
-    );
-
-    # Support test cases
-    $params{file} .= ".gpus" if $params{file} && $params{gpus};
-
-    my $gpus;
-
-    foreach my $line (getAllLines(%params)) {
-        if ($line =~ /^\s+\[(\d+)\]\s+\[(gpu:\d+)\]\s+\((.*)\)$/) {
-            $gpus->{$1} = {
-                NAME => $2,
-                INFO => $3
-            };
-        }
-    }
-
-    return $gpus;
-}
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_all_lines
+from GLPI.Agent.Tools.Generic import get_pci_device_vendor
 
 
-sub _getNvidiaVideos {
-    my (%params) = @_;
-
-    my @videos;
-
-    my $gpus = _getNvidiaGpus(%params);
-    foreach my $num (sort(keys(%{$gpus}))) {
-        my $gpu = $gpus->{$num}->{NAME};
-        my ($video, $xres, $yres);
-        foreach my $line (getAllLines(
-            command => "nvidia-settings -t -c :$num -q all",
-            %params
-        )) {
-            if ($line =~ /^\s+ScreenPosition: x=\d+, y=\d+, width=(\d+), height=(\d+)$/) {
-                $xres = $1;
-                $yres = $2;
-            } elsif ($line =~ /^Attributes queryable via .*:$num\[$gpu\]:/) {
-                $video = { CHIPSET => $gpus->{$num}->{INFO} };
-                $video->{RESOLUTION} = $xres.'x'.$yres if $xres && $yres;
-                next;
-            } elsif ($line =~ /^Attributes queryable via/) {
-                push @videos, _updatePci($video) if $video;
-                undef $video;
-            }
-            next unless defined($video);
-
-            if ($line =~ /^\s+TotalDedicatedGPUMemory:\s+(\d+)/) {
-                $video->{MEMORY} = $1;
-            } elsif ($line =~ /^\s+PCIDomain:\s+(\d+)/) {
-                $video->{PCIDOMAIN} = $1;
-            } elsif ($line =~ /^\s+PCIBus:\s+(\d+)/) {
-                $video->{PCIBUS} = $1;
-            } elsif ($line =~ /^\s+PCIDevice:\s+(\d+)/) {
-                $video->{PCIDEVICE} = $1;
-            } elsif ($line =~ /^\s+PCIFunc:\s+(\d+)/) {
-                $video->{PCIFUNC} = $1;
-            } elsif ($line =~ /^\s+PCIID:\s+(\S+)/) {
-                my ($vendor_id, $device_id) = map { sprintf("%04x", $_) } split(",", $1);
-                $video->{PCIID} = "$vendor_id:$device_id";
-                my $vendor = getPCIDeviceVendor(id => $vendor_id, logger => $params{logger});
-                if ($vendor && exists($vendor->{devices}->{$device_id}->{name})) {
-                    my $chipset = $vendor->{name} ? $vendor->{name}." " : "";
-                    if ($vendor->{devices}->{$device_id}->{name} =~ /^(.*)\s+\[(.*)\]$/) {
-                        $video->{CHIPSET} = $chipset.$1;
-                        $chipset .= $2;
-                    }
-                    $video->{NAME} = $chipset;
+class Nvidia(InventoryModule):
+    """Nvidia video cards inventory module using nvidia-settings."""
+    
+    PCISLOT_RE = re.compile(r'^(?:([0-9a-f]+):)?([0-9a-f]{2}):([0-9a-f]{2})\.([0-9a-f]+)$', re.IGNORECASE)
+    
+    @staticmethod
+    def category() -> str:
+        """Return the inventory category."""
+        return "video"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('nvidia-settings')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        videos = inventory.get_section('VIDEOS') or []
+        
+        for video in Nvidia._get_nvidia_videos(logger=logger):
+            # Try to find matching existing video entry
+            current = None
+            for v in videos:
+                if Nvidia._same_pci_slot(v.get('PCISLOT', ''), video.get('PCISLOT', '')):
+                    current = v
+                    break
+            
+            if current:
+                if video.get('NAME') and not current.get('NAME'):
+                    current['NAME'] = video['NAME']
+                if video.get('MEMORY'):
+                    current['MEMORY'] = video['MEMORY']
+                if not current.get('CHIPSET'):
+                    current['CHIPSET'] = video.get('CHIPSET')
+                if video.get('RESOLUTION'):
+                    current['RESOLUTION'] = video['RESOLUTION']
+            else:
+                if inventory:
+                    inventory.add_entry(
+                        section='VIDEOS',
+                        entry=video
+                    )
+    
+    @staticmethod
+    def _same_pci_slot(first: str, second: str) -> bool:
+        """Check if two PCI slots are the same."""
+        first_match = Nvidia.PCISLOT_RE.match(first)
+        second_match = Nvidia.PCISLOT_RE.match(second)
+        
+        if not first_match or not second_match:
+            return False
+        
+        first_groups = first_match.groups()
+        second_groups = second_match.groups()
+        
+        return (
+            int(first_groups[0] or '0', 16) == int(second_groups[0] or '0', 16) and
+            int(first_groups[1], 16) == int(second_groups[1], 16) and
+            int(first_groups[2], 16) == int(second_groups[2], 16) and
+            int(first_groups[3], 16) == int(second_groups[3], 16)
+        )
+    
+    @staticmethod
+    def _update_pci(hash_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Update PCI slot format."""
+        dom = hash_data.pop('PCIDOMAIN', None)
+        bus = hash_data.pop('PCIBUS', None)
+        dev = hash_data.pop('PCIDEVICE', None)
+        func = hash_data.pop('PCIFUNC', None)
+        
+        if bus is not None and dev is not None and func is not None:
+            hash_data['PCISLOT'] = f"{bus:02x}:{dev:02x}.{func:x}"
+            if dom:
+                hash_data['PCISLOT'] = f"{dom:04x}:{hash_data['PCISLOT']}"
+        
+        return hash_data
+    
+    @staticmethod
+    def _get_nvidia_gpus(**params) -> Optional[Dict[int, Dict[str, str]]]:
+        """Get list of Nvidia GPUs."""
+        params_copy = dict(params)
+        params_copy['command'] = 'nvidia-settings -t -c all -q gpus'
+        
+        # Support test cases
+        if params.get('file') and params.get('gpus'):
+            params_copy['file'] = params['file'] + '.gpus'
+        
+        gpus = {}
+        
+        for line in get_all_lines(**params_copy):
+            match = re.match(r'^\s+\[(\d+)\]\s+\[(gpu:\d+)\]\s+\((.*)\)$', line)
+            if match:
+                num, name, info = match.groups()
+                gpus[int(num)] = {
+                    'NAME': name,
+                    'INFO': info
                 }
-            }
-        }
-        push @videos, _updatePci($video) if $video;
-    }
-
-    return @videos;
-}
-
-1;
+        
+        return gpus
+    
+    @staticmethod
+    def _get_nvidia_videos(**params) -> List[Dict[str, Any]]:
+        """Get Nvidia video cards details."""
+        videos = []
+        
+        gpus = Nvidia._get_nvidia_gpus(**params)
+        if not gpus:
+            return videos
+        
+        for num in sorted(gpus.keys()):
+            gpu = gpus[num]['NAME']
+            video = None
+            xres = yres = None
+            
+            for line in get_all_lines(
+                command=f'nvidia-settings -t -c :{num} -q all',
+                **params
+            ):
+                # Screen position
+                match = re.match(r'^\s+ScreenPosition: x=\d+, y=\d+, width=(\d+), height=(\d+)$', line)
+                if match:
+                    xres, yres = match.groups()
+                
+                # Start of attributes for this GPU
+                elif re.match(rf'^Attributes queryable via .*:{num}\[{re.escape(gpu)}\]:', line):
+                    video = {'CHIPSET': gpus[num]['INFO']}
+                    if xres and yres:
+                        video['RESOLUTION'] = f'{xres}x{yres}'
+                    continue
+                
+                # Start of attributes for another entity - save current video
+                elif re.match(r'^Attributes queryable via', line):
+                    if video:
+                        videos.append(Nvidia._update_pci(video))
+                        video = None
+                
+                if not video:
+                    continue
+                
+                # Parse video attributes
+                match = re.match(r'^\s+TotalDedicatedGPUMemory:\s+(\d+)', line)
+                if match:
+                    video['MEMORY'] = match.group(1)
+                    continue
+                
+                match = re.match(r'^\s+PCIDomain:\s+(\d+)', line)
+                if match:
+                    video['PCIDOMAIN'] = int(match.group(1))
+                    continue
+                
+                match = re.match(r'^\s+PCIBus:\s+(\d+)', line)
+                if match:
+                    video['PCIBUS'] = int(match.group(1))
+                    continue
+                
+                match = re.match(r'^\s+PCIDevice:\s+(\d+)', line)
+                if match:
+                    video['PCIDEVICE'] = int(match.group(1))
+                    continue
+                
+                match = re.match(r'^\s+PCIFunc:\s+(\d+)', line)
+                if match:
+                    video['PCIFUNC'] = int(match.group(1))
+                    continue
+                
+                match = re.match(r'^\s+PCIID:\s+(\S+)', line)
+                if match:
+                    pciid_parts = match.group(1).split(',')
+                    vendor_id = f"{int(pciid_parts[0]):04x}"
+                    device_id = f"{int(pciid_parts[1]):04x}"
+                    video['PCIID'] = f"{vendor_id}:{device_id}"
+                    
+                    vendor = get_pci_device_vendor(id=vendor_id, logger=params.get('logger'))
+                    if vendor and vendor.get('devices', {}).get(device_id, {}).get('name'):
+                        chipset = (vendor.get('name', '') + ' ') if vendor.get('name') else ''
+                        device_name = vendor['devices'][device_id]['name']
+                        name_match = re.match(r'^(.*)\s+\[(.*)\]$', device_name)
+                        if name_match:
+                            video['CHIPSET'] = chipset + name_match.group(1)
+                            chipset += name_match.group(2)
+                        video['NAME'] = chipset
+            
+            if video:
+                videos.append(Nvidia._update_pci(video))
+        
+        return videos

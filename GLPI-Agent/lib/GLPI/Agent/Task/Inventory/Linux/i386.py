@@ -1,22 +1,28 @@
-package GLPI::Agent::Task::Inventory::Linux::i386;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Linux i386 - Python Implementation
+"""
 
-use strict;
-use warnings;
+import platform
+import re
+from typing import Any
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import Uname
 
-use Config;
 
-use GLPI::Agent::Tools;
-
-sub isEnabled {
-    my (%params) = @_;
-
-    return Uname("-m") =~ /^(i\d86|x86_64)/ if $params{remote};
-    return $Config{archname} =~ /^(i\d86|x86_64)/;
-}
-
-sub doInventory {
-}
-
-1;
+class i386(InventoryModule):
+    """i386/x86_64 architecture detection module."""
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        if params.get('remote'):
+            machine = Uname('-m')
+            return re.match(r'^(i\d86|x86_64)', machine) is not None
+        return re.match(r'^(i\d86|x86_64)', platform.machine()) is not None
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        pass

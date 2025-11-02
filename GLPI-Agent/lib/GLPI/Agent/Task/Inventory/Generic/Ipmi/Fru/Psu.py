@@ -1,64 +1,72 @@
-package GLPI::Agent::Task::Inventory::Generic::Ipmi::Fru::Psu;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Generic Ipmi Fru Psu - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools.IpmiFru import get_ipmi_fru, parse_fru
+from GLPI.Agent.Inventory.PowerSupplies import PowerSupplies
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::IpmiFru;
-use GLPI::Agent::Tools::PowerSupplies;
 
-use constant    category    => "psu";
-
-# Define a priority so we can update powersupplies inventory
-our $runAfterIfEnabled = [ qw(
-    GLPI::Agent::Task::Inventory::Generic::Dmidecode::Psu
-)];
-
-sub isEnabled {
-    return 1;
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $fru = getIpmiFru(%params)
-        or return;
-
-    my @fru_keys = grep { /^(PS|Pwr Supply )\d+/ } keys(%{$fru})
-        or return;
-
-    # Empty current POWERSUPPLIES section into a new psu list
-    my $psulist = Inventory::PowerSupplies->new( logger => $logger );
-    my $section = $inventory->getSection('POWERSUPPLIES') || [];
-    while (@{$section}) {
-        my $powersupply = shift @{$section};
-        $psulist->add($powersupply);
-    }
-
-    # Merge powersupplies reported by ipmitool
-    my @fru = ();
-    my $fields = $inventory->getFields()->{'POWERSUPPLIES'};
-
-    # omit MODEL field as it's duplicate of PARTNUM field
-    delete $fields->{'MODEL'};
-
-    foreach my $descr (sort @fru_keys) {
-        push @fru, parseFru($fru->{$descr}, $fields);
-    }
-    $psulist->merge(@fru);
-
-    # Add back merged powersupplies into inventory
-    foreach my $psu ($psulist->list()) {
-        $inventory->addEntry(
-            section => 'POWERSUPPLIES',
-            entry   => $psu
-        );
-    }
-}
-
-1;
+class Psu(InventoryModule):
+    """IPMI FRU PSU inventory module."""
+    
+    # Define a priority so we can update powersupplies inventory
+    run_after_if_enabled = [
+        'GLPI.Agent.Task.Inventory.Generic.Dmidecode.Psu'
+    ]
+    
+    @staticmethod
+    def category() -> str:
+        """Return the inventory category."""
+        return "psu"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return True
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        fru = get_ipmi_fru(**params)
+        if not fru:
+            return
+        
+        fru_keys = [key for key in fru.keys() if re.match(r'^(PS|Pwr Supply )\d+', key)]
+        if not fru_keys:
+            return
+        
+        # Empty current POWERSUPPLIES section into a new psu list
+        psulist = PowerSupplies(logger=logger)
+        section = inventory.get_section('POWERSUPPLIES') or []
+        while section:
+            powersupply = section.pop(0)
+            psulist.add(powersupply)
+        
+        # Merge powersupplies reported by ipmitool
+        fru_list = []
+        fields = inventory.get_fields().get('POWERSUPPLIES')
+        
+        # Omit MODEL field as it's duplicate of PARTNUM field
+        if 'MODEL' in fields:
+            del fields['MODEL']
+        
+        for descr in sorted(fru_keys):
+            fru_list.append(parse_fru(fru[descr], fields))
+        
+        psulist.merge(*fru_list)
+        
+        # Add back merged powersupplies into inventory
+        for psu in psulist.list():
+            if inventory:
+                inventory.add_entry(
+                    section='POWERSUPPLIES',
+                    entry=psu
+                )

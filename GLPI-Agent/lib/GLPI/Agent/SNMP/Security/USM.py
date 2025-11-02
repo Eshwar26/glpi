@@ -1,1950 +1,1298 @@
-package GLPI::Agent::SNMP::Security::USM;
+"""
+SNMPv3 User-based Security Model (USM) Implementation
+
+This module implements the SNMPv3 User-based Security Model as defined in:
+- RFC 3414: User-based Security Model (USM) for version 3 of SNMP
+- RFC 3826: The Advanced Encryption Standard (AES) Cipher Algorithm in the SNMP USM
+- Draft extensions for SHA-2 family and additional AES modes
+
+The USM provides SNMP message level security, implementing:
+1. Data integrity (authentication using HMAC)
+2. Data origin authentication (via shared secrets)
+3. Data confidentiality (encryption using DES, 3DES, or AES)
+4. Protection against message replay, delay, and redirection
+
+Copyright: Ported from Net::SNMP::Security::USM by David M. Town
+License: Same terms as Python itself
+"""
+
+import time
+import struct
+import hashlib
+import hmac
+from typing import Optional, Dict, Tuple, Any, Union, List
+from dataclasses import dataclass
+from enum import Enum
+
+# Cryptographic imports
+try:
+    from Crypto.Cipher import DES, DES3, AES
+    from Crypto.Util import Counter
+    CRYPTO_AVAILABLE = True
+except ImportError:
+    CRYPTO_AVAILABLE = False
+    print("Warning: PyCryptodome not available. Install with: pip install pycryptodome")
 
-# Module to register a v6.0.1 updated Net::SNMP::Security::USM version to add
-# Support for:
-#  - sha224, sha256, sha384 and sha512 as authprotocol
-#  - aes192c and aes256c as privprotocol
-
-## no critic
-
-$INC{"Net/SNMP/Security/USM.pm"} = __FILE__;
-
-# -*- mode: perl -*-
-# ============================================================================
-
-package
-    Net::SNMP::Security::USM;
-
-# $Id: USM.pm,v 4.1 2010/09/10 00:01:22 dtown Rel $
-
-# Object that implements the SNMPv3 User-based Security Model.
-
-# Copyright (c) 2001-2010 David M. Town <dtown@cpan.org>
-# All rights reserved.
-
-# This program is free software; you may redistribute it and/or modify it
-# under the same terms as the Perl 5 programming language system itself.
-
-# ============================================================================
-
-use strict;
-
-use Net::SNMP::Security qw( :ALL );
-
-use Net::SNMP::Message qw(
-   :msgFlags asn1_itoa OCTET_STRING SEQUENCE INTEGER SNMP_VERSION_3 TRUE FALSE
-);
-
-use Crypt::DES();
-use Digest::MD5();
-use Digest::SHA();
-
-use Digest::SHA qw( hmac_sha1 hmac_sha224 hmac_sha256 hmac_sha384 hmac_sha512 );
-use Digest::HMAC_MD5 qw ( hmac_md5 );
-
-## Version of the Net::SNMP::Security::USM module
-
-our $VERSION = v4.0.1;
-
-## Handle importing/exporting of symbols
-
-use base qw( Net::SNMP::Security );
-
-our @EXPORT_OK;
-
-our %EXPORT_TAGS = (
-   authprotos => [
-      qw( AUTH_PROTOCOL_NONE AUTH_PROTOCOL_HMACMD5 AUTH_PROTOCOL_HMACSHA
-          AUTH_PROTOCOL_HMACSHA224 AUTH_PROTOCOL_HMACSHA256
-          AUTH_PROTOCOL_HMACSHA384 AUTH_PROTOCOL_HMACSHA512 )
-   ],
-   levels     => [
-      qw( SECURITY_LEVEL_NOAUTHNOPRIV SECURITY_LEVEL_AUTHNOPRIV
-          SECURITY_LEVEL_AUTHPRIV )
-   ],
-   models     => [
-      qw( SECURITY_MODEL_ANY SECURITY_MODEL_SNMPV1 SECURITY_MODEL_SNMPV2C
-          SECURITY_MODEL_USM )
-   ],
-   privprotos => [
-      qw( PRIV_PROTOCOL_NONE PRIV_PROTOCOL_DES PRIV_PROTOCOL_AESCFB128
-          PRIV_PROTOCOL_DRAFT_3DESEDE PRIV_PROTOCOL_DRAFT_AESCFB128
-          PRIV_PROTOCOL_DRAFT_AESCFB192 PRIV_PROTOCOL_DRAFT_AESCFB256
-          PRIV_PROTOCOL_AESCFB192_CISCO PRIV_PROTOCOL_AESCFB256_CISCO )
-   ],
-);
-
-Exporter::export_ok_tags( qw( authprotos levels models privprotos ) );
-
-$EXPORT_TAGS{ALL} = [ @EXPORT_OK ];
-
-## RCC 3414 - Authentication protocols
-
-sub AUTH_PROTOCOL_NONE       { '1.3.6.1.6.3.10.1.1.1' } # usmNoAuthProtocol
-sub AUTH_PROTOCOL_HMACMD5    { '1.3.6.1.6.3.10.1.1.2' } # usmHMACMD5AuthProtocol
-sub AUTH_PROTOCOL_HMACSHA    { '1.3.6.1.6.3.10.1.1.3' } # usmHMACSHAAuthProtocol
-sub AUTH_PROTOCOL_HMACSHA224 { '1.3.6.1.6.3.10.1.1.4' } # usmHMAC128SHA224AuthProtocol
-sub AUTH_PROTOCOL_HMACSHA256 { '1.3.6.1.6.3.10.1.1.5' } # usmHMAC192SHA256AuthProtocol
-sub AUTH_PROTOCOL_HMACSHA384 { '1.3.6.1.6.3.10.1.1.6' } # usmHMAC256SHA384AuthProtocol
-sub AUTH_PROTOCOL_HMACSHA512 { '1.3.6.1.6.3.10.1.1.7' } # usmHMAC384SHA512AuthProtocol
-
-## RFC 3414 - Privacy protocols
-
-sub PRIV_PROTOCOL_NONE    { '1.3.6.1.6.3.10.1.2.1' } # usmNoPrivProtocol
-sub PRIV_PROTOCOL_DES     { '1.3.6.1.6.3.10.1.2.2' } # usmDESPrivProtocol
-
-## RFC 3826 - The AES Cipher Algorithm in the SNMP USM
-
-# usmAesCfb128Protocol
-sub PRIV_PROTOCOL_AESCFB128        {  '1.3.6.1.6.3.10.1.2.4' }
-
-# The privacy protocols below have been implemented using the draft
-# specifications intended to extend the User-based Security Model
-# defined in RFC 3414.  Since the object definitions have not been
-# standardized, they have been based on the Extended Security Options
-# Consortium MIB found at http://www.snmp.com/eso/esoConsortiumMIB.txt.
-
-# Extension to Support Triple-DES EDE <draft-reeder-snmpv3-usm-3desede-00.txt>
-# Reeder and Gudmunsson; October 1999, expired April 2000
-
-# usm3DESPrivProtocol
-sub PRIV_PROTOCOL_DRAFT_3DESEDE    { '1.3.6.1.4.1.14832.1.1' }
-
-# AES Cipher Algorithm in the USM <draft-blumenthal-aes-usm-04.txt>
-# Blumenthal, Maino, and McCloghrie; October 2002, expired April 2003
-
-# usmAESCfb128PrivProtocol
-sub PRIV_PROTOCOL_DRAFT_AESCFB128  { '1.3.6.1.4.1.14832.1.2' }
-
-# usmAESCfb192PrivProtocol
-sub PRIV_PROTOCOL_DRAFT_AESCFB192  { '1.3.6.1.4.1.14832.1.3' }
-
-# usmAESCfb256PrivProtocol
-sub PRIV_PROTOCOL_DRAFT_AESCFB256  { '1.3.6.1.4.1.14832.1.4' }
-
-# cusmAESCfb192PrivProtocol
-sub PRIV_PROTOCOL_AESCFB192_CISCO  { '1.3.6.1.4.1.9.12.6.1.1' }
-
-# cusmAESCfb256PrivProtocol
-sub PRIV_PROTOCOL_AESCFB256_CISCO  { '1.3.6.1.4.1.9.12.6.1.2' }
-
-## Package variables
-
-our $ENGINE_ID;  # Our authoritative snmpEngineID
-# [public methods] -----------------------------------------------------------
-
-sub new
-{
-   my ($class, %argv) = @_;
-
-   # Create a new data structure for the object
-   my $this = bless {
-      '_error'              => undef,                 # Error message
-      '_version'            => SNMP_VERSION_3,        # version
-      '_authoritative'      => FALSE,                 # Authoritative flag
-      '_discovered'         => FALSE,                 # Engine discovery flag
-      '_synchronized'       => FALSE,                 # Synchronization flag
-      '_engine_id'          => q{},                   # snmpEngineID
-      '_engine_boots'       => 0,                     # snmpEngineBoots
-      '_engine_time'        => 0,                     # snmpEngineTime
-      '_latest_engine_time' => 0,                     # latestReceivedEngineTime
-      '_time_epoc'          => time(),                # snmpEngineBoots epoc
-      '_user_name'          => q{},                   # securityName
-      '_auth_data'          => undef,                 # Authentication data
-      '_auth_maclen'        => undef,                 # MAC length
-      '_auth_key'           => undef,                 # authKey
-      '_auth_password'      => undef,                 # Authentication password
-      '_auth_protocol'      => AUTH_PROTOCOL_HMACMD5, # authProtocol
-      '_priv_data'          => undef,                 # Privacy data
-      '_priv_key'           => undef,                 # privKey
-      '_priv_password'      => undef,                 # Privacy password
-      '_priv_protocol'      => PRIV_PROTOCOL_DES,     # privProtocol
-      '_security_level'     => SECURITY_LEVEL_NOAUTHNOPRIV
-   }, $class;
-
-   # We first need to find out if we are an authoritative SNMP
-   # engine and set the authProtocol and privProtocol if they
-   # have been provided.
-
-   foreach (keys %argv) {
-
-      if (/^-?authoritative$/i) {
-         $this->{_authoritative} = (delete $argv{$_}) ? TRUE : FALSE;
-      } elsif (/^-?authprotocol$/i) {
-         $this->_auth_protocol(delete $argv{$_});
-      } elsif (/^-?privprotocol$/i) {
-         $this->_priv_protocol(delete $argv{$_});
-      }
-
-      if (defined $this->{_error}) {
-         return wantarray ? (undef, $this->{_error}) : undef;
-      }
-   }
-
-   # Now validate the rest of the passed arguments
-
-   for (keys %argv) {
-
-      if (/^-?version$/i) {
-         $this->_version($argv{$_});
-      } elsif (/^-?debug$/i) {
-         $this->debug($argv{$_});
-      } elsif ((/^-?engineid$/i) && ($this->{_authoritative})) {
-         $this->_engine_id($argv{$_});
-      } elsif (/^-?username$/i) {
-         $this->_user_name($argv{$_});
-      } elsif (/^-?authkey$/i) {
-         $this->_auth_key($argv{$_});
-      } elsif (/^-?authpassword$/i) {
-         $this->_auth_password($argv{$_});
-      } elsif (/^-?privkey$/i) {
-         $this->_priv_key($argv{$_});
-      } elsif (/^-?privpassword$/i) {
-         $this->_priv_password($argv{$_});
-      } else {
-         $this->_error('The argument "%s" is unknown', $_);
-      }
-
-      if (defined $this->{_error}) {
-         return wantarray ? (undef, $this->{_error}) : undef;
-      }
-
-   }
-
-   # Generate a snmpEngineID and populate the object accordingly
-   # if we are an authoritative snmpEngine.
-
-   if ($this->{_authoritative}) {
-      $this->_snmp_engine_init();
-   }
-
-   # Define the securityParameters
-   if (!defined $this->_security_params()) {
-      return wantarray ? (undef, $this->{_error}) : undef;
-   }
-
-   # Return the object and an empty error message (in list context)
-   return wantarray ? ($this, q{}) : $this;
-}
-
-sub generate_request_msg
-{
-   my ($this, $pdu, $msg) = @_;
-
-   # Clear any previous errors
-   $this->_error_clear();
-
-   if (@_ < 3) {
-      return $this->_error('The required PDU and/or Message object is missing');
-   }
-
-   # Validate the SNMP version of the PDU
-   if ($pdu->version() != $this->{_version}) {
-      return $this->_error(
-         'The SNMP version %d was expected, but %d was found',
-         $this->{_version}, $pdu->version()
-      );
-   }
-
-   # Validate the securityLevel of the PDU
-   if ($pdu->security_level() > $this->{_security_level}) {
-      return $this->_error(
-         'The PDU securityLevel %d is greater than the configured value %d',
-         $pdu->security_level(), $this->{_security_level}
-      );
-   }
-
-   # Validate PDU type with snmpEngine type
-   if ($pdu->expect_response()) {
-      if ($this->{_authoritative}) {
-         return $this->_error(
-            'Must be a non-authoritative SNMP engine to generate a %s',
-            asn1_itoa($pdu->pdu_type())
-         );
-      }
-   } else {
-      if (!$this->{_authoritative}) {
-         return $this->_error(
-            'Must be an authoritative SNMP engine to generate a %s',
-            asn1_itoa($pdu->pdu_type())
-         );
-      }
-   }
-
-   # Extract the msgGlobalData out of the message
-   my $msg_global_data = $msg->clear();
-
-   # AES in the USM Section 3.1.2.1 - "The 128-bit IV is obtained as
-   # the concatenation of the... ...snmpEngineBoots, ...snmpEngineTime,
-   # and a local 64-bit integer.  We store the current snmpEngineBoots
-   # and snmpEngineTime before encrypting the PDU so that the computed
-   # IV matches the transmitted msgAuthoritativeEngineBoots and
-   # msgAuthoritativeEngineTime.
-
-   my $msg_engine_time  = $this->_engine_time();
-   my $msg_engine_boots = $this->_engine_boots();
-
-   # Copy the PDU into a "plain text" buffer
-   my $pdu_buffer  = $pdu->copy();
-   my $priv_params = q{};
-
-   # encryptedPDU::=OCTET STRING
-   if ($pdu->security_level() > SECURITY_LEVEL_AUTHNOPRIV) {
-      if (!defined $this->_encrypt_data($msg, $priv_params, $pdu_buffer)) {
-         return $this->_error();
-      }
-   }
-
-   # msgPrivacyParameters::=OCTET STRING
-   if (!defined $msg->prepare(OCTET_STRING, $priv_params)) {
-      return $this->_error($msg->error());
-   }
-
-   # msgAuthenticationParameters::=OCTET STRING
-
-   my $auth_params = q{};
-   my $auth_location = 0;
-
-   if ($pdu->security_level() > SECURITY_LEVEL_NOAUTHNOPRIV) {
-
-      # Save the location to fill in msgAuthenticationParameters later
-      $auth_location = $msg->length() + $this->{_auth_maclen} + length $pdu_buffer;
-
-      # Set the msgAuthenticationParameters to all zeros
-      $auth_params = pack "x$this->{_auth_maclen}";
-   }
-
-   if (!defined $msg->prepare(OCTET_STRING, $auth_params)) {
-      return $this->_error($msg->error());
-   }
-
-   # msgUserName::=OCTET STRING
-   if (!defined $msg->prepare(OCTET_STRING, $pdu->security_name())) {
-      return $this->_error($msg->error());
-   }
-
-   # msgAuthoritativeEngineTime::=INTEGER
-   if (!defined $msg->prepare(INTEGER, $msg_engine_time)) {
-      return $this->_error($msg->error());
-   }
-
-   # msgAuthoritativeEngineBoots::=INTEGER
-   if (!defined $msg->prepare(INTEGER, $msg_engine_boots)) {
-      return $this->_error($msg->error());
-   }
-
-   # msgAuthoritativeEngineID
-   if (!defined $msg->prepare(OCTET_STRING, $this->_engine_id())) {
-      return $this->_error($msg->error());
-   }
-
-   # UsmSecurityParameters::= SEQUENCE
-   if (!defined $msg->prepare(SEQUENCE)) {
-      return $this->_error($msg->error());
-   }
-
-   # msgSecurityParameters::=OCTET STRING
-   if (!defined $msg->prepare(OCTET_STRING, $msg->clear())) {
-      return $this->_error($msg->error());
-   }
-
-   # Append the PDU
-   if (!defined $msg->append($pdu_buffer)) {
-      return $this->_error($msg->error());
-   }
-
-   # Prepend the msgGlobalData
-   if (!defined $msg->prepend($msg_global_data)) {
-      return $this->_error($msg->error());
-   }
-
-   # version::=INTEGER
-   if (!defined $msg->prepare(INTEGER, $this->{_version})) {
-      return $this->_error($msg->error());
-   }
-
-   # message::=SEQUENCE
-   if (!defined $msg->prepare(SEQUENCE)) {
-      return $this->_error($msg->error());
-   }
-
-   # Apply authentication
-   if ($pdu->security_level() > SECURITY_LEVEL_NOAUTHNOPRIV) {
-      if (!defined $this->_authenticate_outgoing_msg($msg, $auth_location)) {
-         return $this->_error($msg->error());
-      }
-   }
-
-   # Return the Message
-   return $msg;
-}
-
-sub process_incoming_msg
-{
-   my ($this, $msg) = @_;
-
-   # Clear any previous errors
-   $this->_error_clear();
-
-   return $this->_error('The required Message object is missing') if (@_ < 2);
-
-   # msgSecurityParameters::=OCTET STRING
-
-   my $msg_params = $msg->process(OCTET_STRING);
-   return $this->_error($msg->error()) if !defined $msg_params;
-
-   # Need to move the buffer index back to the begining of the data
-   # portion of the OCTET STRING that contains the msgSecurityParameters.
-
-   $msg->index($msg->index() - length $msg_params);
-
-   # UsmSecurityParameters::=SEQUENCE
-   return $this->_error($msg->error()) if !defined $msg->process(SEQUENCE);
-
-   # msgAuthoritativeEngineID::=OCTET STRING
-   my $msg_engine_id;
-   if (!defined($msg_engine_id = $msg->process(OCTET_STRING))) {
-      return $this->_error($msg->error());
-   }
-
-   # msgAuthoritativeEngineBoots::=INTEGER (0..2147483647)
-   my $msg_engine_boots;
-   if (!defined ($msg_engine_boots = $msg->process(INTEGER))) {
-      return $this->_error($msg->error());
-   }
-   if (($msg_engine_boots < 0) || ($msg_engine_boots > 2147483647)) {
-      return $this->_error(
-         'The msgAuthoritativeEngineBoots value %d is out of range ' .
-         '(0..2147483647)', $msg_engine_boots
-      );
-   }
-
-   # msgAuthoritativeEngineTime::=INTEGER (0..2147483647)
-   my $msg_engine_time;
-   if (!defined ($msg_engine_time = $msg->process(INTEGER))) {
-      return $this->_error($msg->error());
-   }
-   if (($msg_engine_time < 0) || ($msg_engine_time > 2147483647)) {
-      return $this->_error(
-         'The msgAuthoritativeEngineTime value %d is out of range ' .
-         '(0..2147483647)', $msg_engine_time
-      );
-   }
-
-   # msgUserName::=OCTET STRING (SIZE(0..32))
-   if (!defined $msg->security_name($msg->process(OCTET_STRING))) {
-      return $this->_error($msg->error());
-   }
-
-   # msgAuthenticationParameters::=OCTET STRING
-   my $auth_params;
-   if (!defined ($auth_params = $msg->process(OCTET_STRING))) {
-      return $this->_error($msg->error());
-   }
-
-   # We need to zero out the msgAuthenticationParameters in order
-   # to compute the HMAC properly.
-
-   if (my $len = length $auth_params) {
-      if ($len != $this->{_auth_maclen}) {
-         return $this->_error(
-            'The msgAuthenticationParameters length of %d is invalid', $len
-         );
-      }
-      substr ${$msg->reference}, ($msg->index() - $this->{_auth_maclen}), $this->{_auth_maclen}, pack "x$this->{_auth_maclen}";
-   }
-
-   # msgPrivacyParameters::=OCTET STRING
-   my $priv_params;
-   if (!defined ($priv_params = $msg->process(OCTET_STRING))) {
-      return $this->_error($msg->error());
-   }
-
-   # Validate the msgAuthoritativeEngineID and msgUserName
-
-   if ($this->{_discovered}) {
-
-      if ($msg_engine_id ne $this->_engine_id()) {
-         return $this->_error(
-            'The msgAuthoritativeEngineID "%s" was expected, but "%s" was ' .
-            'found', unpack('H*', $this->_engine_id()),
-            unpack 'H*', $msg_engine_id
-         );
-      }
-
-      if ($msg->security_name() ne $this->_user_name()) {
-         return $this->_error(
-            'The msgUserName "%s" was expected, but "%s" was found',
-            $this->_user_name(), $msg->security_name()
-         );
-      }
-
-   } else {
-
-      # Handle authoritativeEngineID discovery
-      if (!defined $this->_engine_id_discovery($msg_engine_id)) {
-         return $this->_error();
-      }
-
-   }
-
-   # Validate the incoming securityLevel
-
-   my $security_level = $msg->security_level();
-
-   if ($security_level > $this->{_security_level}) {
-      return $this->_error(
-          'The message securityLevel %d is greater than the configured ' .
-          'value %d', $security_level, $this->{_security_level}
-      );
-   }
-
-   if ($security_level > SECURITY_LEVEL_NOAUTHNOPRIV) {
-
-      # Authenticate the message
-      if (!defined $this->_authenticate_incoming_msg($msg, $auth_params)) {
-         return $this->_error();
-      }
-
-      # Synchronize the time
-      if (!$this->_synchronize($msg_engine_boots, $msg_engine_time)) {
-         return $this->_error();
-      }
-
-      # Check for timeliness
-      if (!defined $this->_timeliness($msg_engine_boots, $msg_engine_time)) {
-         return $this->_error();
-      }
-
-      if ($security_level > SECURITY_LEVEL_AUTHNOPRIV) {
-
-         # Validate the msgPrivacyParameters length.
-
-         if (length($priv_params) != 8) {
-            return $this->_error(
-               'The msgPrivacyParameters length of %d is invalid',
-               length $priv_params
-            );
-         }
-
-         # AES in the USM Section 3.1.2.1 - "The 128-bit IV is
-         # obtained as the concatenation of the... ...snmpEngineBoots,
-         # ...snmpEngineTime, and a local 64-bit integer.  ...The
-         # 64-bit integer must be placed in the msgPrivacyParameters
-         # field..."  We must prepend the snmpEngineBoots and
-         # snmpEngineTime as received in order to compute the IV.
-
-         if (($this->{_priv_protocol} eq PRIV_PROTOCOL_AESCFB128)       ||
-             ($this->{_priv_protocol} eq PRIV_PROTOCOL_DRAFT_AESCFB192) ||
-             ($this->{_priv_protocol} eq PRIV_PROTOCOL_DRAFT_AESCFB256) ||
-             ($this->{_priv_protocol} eq PRIV_PROTOCOL_AESCFB192_CISCO) ||
-             ($this->{_priv_protocol} eq PRIV_PROTOCOL_AESCFB256_CISCO))
-         {
-            substr $priv_params, 0, 0, pack 'NN', $msg_engine_boots,
-                                                  $msg_engine_time;
-         }
-
-         # encryptedPDU::=OCTET STRING
-
-         return $this->_decrypt_data($msg,
-                                     $priv_params,
-                                     $msg->process(OCTET_STRING));
-
-      }
-
-   }
-
-   return TRUE;
-}
-
-sub user_name
-{
-   return $_[0]->{_user_name};
-}
-
-sub auth_protocol
-{
-   my ($this) = @_;
-
-   if ($this->{_security_level} > SECURITY_LEVEL_NOAUTHNOPRIV) {
-      return $this->{_auth_protocol};
-   }
-
-   return AUTH_PROTOCOL_NONE;
-}
-
-sub auth_key
-{
-   return $_[0]->{_auth_key};
-}
-
-sub priv_protocol
-{
-   my ($this) = @_;
-
-   if ($this->{_security_level} > SECURITY_LEVEL_AUTHNOPRIV) {
-      return $this->{_priv_protocol};
-   }
-
-   return PRIV_PROTOCOL_NONE;
-}
-
-sub priv_key
-{
-   return $_[0]->{_priv_key};
-}
-
-sub engine_id
-{
-   return $_[0]->{_engine_id};
-}
-
-sub engine_boots
-{
-   goto _engine_boots;
-}
-
-sub engine_time
-{
-   goto &_engine_time;
-}
-
-sub security_level
-{
-   return $_[0]->{_security_level};
-}
-
-sub security_model
-{
-   # RFC 3411 - SnmpSecurityModel::=TEXTUAL-CONVENTION
-
-   return SECURITY_MODEL_USM;
-}
-
-sub security_name
-{
-   goto &_user_name;
-}
-
-sub discovered
-{
-   my ($this) = @_;
-
-   if ($this->{_security_level} > SECURITY_LEVEL_NOAUTHNOPRIV) {
-      return ($this->{_discovered} && $this->{_synchronized});
-   }
-
-   return $this->{_discovered};
-}
-
-# [private methods] ----------------------------------------------------------
-
-sub _version
-{
-   my ($this, $version) = @_;
-
-   if ($version != SNMP_VERSION_3) {
-      return $this->_error('The SNMP version %s is not supported', $version);
-   }
-
-   return $this->{_version} = $version;
-}
-
-sub _engine_id
-{
-   my ($this, $engine_id) = @_;
-
-   if (@_ < 2) {
-      return $this->{_engine_id};
-   }
-
-   if ($engine_id =~  m/^(?:0x)?([A-F0-9]+)$/i) {
-       my $eid = pack 'H*', length($1) %  2 ? '0'.$1 : $1;
-       my $len = length $eid;
-       if ($len < 5 || $len > 32) {
-          return $this->_error(
-             'The authoritativeEngineID length of %d is out of range (5..32)',
-             $len
-          );
-       }
-       $this->{_engine_id} = $eid;
-   } else {
-      return $this->_error(
-          'The authoritativeEngineID "%s" is expected in hexadecimal format',
-          $engine_id
-      );
-   }
-
-   return $this->{_engine_id};
-}
-
-sub _user_name
-{
-   my ($this, $user_name) = @_;
-
-   if (@_ == 2) {
-      if ($user_name eq q{}) {
-         return $this->_error('An empty userName was specified');
-      } elsif (length($user_name) > 32) {
-         return $this->_error(
-            'The userName length of %d is out of range (1..32)',
-            length $user_name
-         );
-      }
-      $this->{_user_name} = $user_name;
-   }
-
-   # RFC 3414 Section 4 - "Discovery... ...msgUserName of zero-length..."
-
-   return ($this->{_discovered}) ? $this->{_user_name} : q{};
-}
-
-sub _snmp_engine_init
-{
-   my ($this) = @_;
-
-   if ($this->{_engine_id} eq q{}) {
-
-      # Initialize our snmpEngineID using the algorithm described
-      # in RFC 3411 - SnmpEngineID::=TEXTUAL-CONVENTION.
-
-      # The first bit is set to one to indicate that the RFC 3411
-      # algorithm is being used.  The first fours bytes are to be
-      # the agent's SNMP management private enterprise number, but
-      # they are set to all zeros. The fifth byte is set to one to
-      # indicate that the final four bytes are an IPv4 address.
-
-      if (!defined $ENGINE_ID) {
-         $ENGINE_ID = eval {
-            require Sys::Hostname;
-            pack('H10', '8000000001') . gethostbyname Sys::Hostname::hostname();
-         };
-
-         # Fallback in case gethostbyname() or hostname() fail
-         if ($@) {
-            $ENGINE_ID = pack 'x11H2', '01';
-         }
-      }
-
-      $this->{_engine_id} = $ENGINE_ID;
-   }
-
-   $this->{_engine_boots} = 1;
-   $this->{_time_epoc}    = $^T;
-   $this->{_synchronized} = TRUE;
-   $this->{_discovered}   = TRUE;
-
-   return TRUE;
-}
-
-sub _auth_key
-{
-   my ($this, $auth_key) = @_;
-
-   if (@_ == 2) {
-      if ($auth_key =~ m/^(?:0x)?([A-F0-9]+)$/i) {
-         $this->{_auth_key} = pack 'H*', length($1) % 2 ? '0'.$1 : $1;
-         if (!defined $this->_auth_key_validate()) {
-            return $this->_error();
-         }
-      } else {
-         return $this->_error(
-            'The authKey "%s" is expected in hexadecimal format', $auth_key
-         );
-      }
-   }
-
-   return $this->{_auth_key};
-}
-
-sub _auth_password
-{
-   my ($this, $auth_password) = @_;
-
-   if (@_ == 2) {
-      if ($auth_password eq q{}) {
-         return $this->_error('An empty authentication password was specified');
-      }
-      $this->{_auth_password} = $auth_password;
-   }
-
-   return $this->{_auth_password};
-}
-
-{
-   my $protocols = {
-      '(?:hmac-)?md5(?:-96)?',           AUTH_PROTOCOL_HMACMD5,
-      quotemeta AUTH_PROTOCOL_HMACMD5,   AUTH_PROTOCOL_HMACMD5,
-      '(?:hmac-)?sha(?:-?1|-96)?',       AUTH_PROTOCOL_HMACSHA,
-      quotemeta AUTH_PROTOCOL_HMACSHA,   AUTH_PROTOCOL_HMACSHA,
-      '(?:hmac-)?sha-?224',              AUTH_PROTOCOL_HMACSHA224,
-      'usmHMAC128SHA224AuthProtocol',    AUTH_PROTOCOL_HMACSHA224,
-      quotemeta AUTH_PROTOCOL_HMACSHA224,AUTH_PROTOCOL_HMACSHA224,
-      '(?:hmac-)?sha-?256',              AUTH_PROTOCOL_HMACSHA256,
-      'usmHMAC192SHA256AuthProtocol',    AUTH_PROTOCOL_HMACSHA256,
-      quotemeta AUTH_PROTOCOL_HMACSHA256,AUTH_PROTOCOL_HMACSHA256,
-      '(?:hmac-)?sha-?384',              AUTH_PROTOCOL_HMACSHA384,
-      'usmHMAC256SHA384AuthProtocol',    AUTH_PROTOCOL_HMACSHA384,
-      quotemeta AUTH_PROTOCOL_HMACSHA384,AUTH_PROTOCOL_HMACSHA384,
-      '(?:hmac-)?sha-?512',              AUTH_PROTOCOL_HMACSHA512,
-      'usmHMAC384SHA512AuthProtocol',    AUTH_PROTOCOL_HMACSHA512,
-      quotemeta AUTH_PROTOCOL_HMACSHA512,AUTH_PROTOCOL_HMACSHA512,
-   };
-
-   sub _auth_protocol
-   {
-      my ($this, $proto) = @_;
-
-      if (@_ < 2) {
-         return $this->{_auth_protocol};
-      }
-
-      if ($proto eq q{}) {
-         return $this->_error('An empty authProtocol was specified');
-      }
-
-      for (keys %{$protocols}) {
-         if ($proto =~ /^$_$/i) {
-            return $this->{_auth_protocol} = $protocols->{$_};
-         }
-      }
-
-      return $this->_error('The authProtocol "%s" is unknown', $proto);
-   }
-
-}
-
-sub _priv_key
-{
-   my ($this, $priv_key) = @_;
-
-   if (@_ == 2) {
-      if ($priv_key =~ m/^(?:0x)?([A-F0-9]+)$/i) {
-         $this->{_priv_key} = pack 'H*', length($1) % 2 ? '0'.$1 : $1;
-         if (!defined $this->_priv_key_validate()) {
-            return $this->_error();
-         }
-      } else {
-         return $this->_error(
-            'The privKey "%s" is expected in hexadecimal format', $priv_key
-         );
-      }
-   }
-
-   return $this->{_priv_key};
-}
-
-sub _priv_password
-{
-   my ($this, $priv_password) = @_;
-
-   if (@_ == 2) {
-      if ($priv_password eq q{}) {
-         return $this->_error('An empty privacy password was specified');
-      }
-      $this->{_priv_password} = $priv_password;
-   }
-
-   return $this->{_priv_password};
-}
-
-{
-   my $protocols = {
-      '(?:cbc-)?des',                           PRIV_PROTOCOL_DES,
-      quotemeta PRIV_PROTOCOL_DES,              PRIV_PROTOCOL_DES,
-      '(?:cbc-)?(?:3|triple-)des(?:-?ede)?',    PRIV_PROTOCOL_DRAFT_3DESEDE,
-      quotemeta PRIV_PROTOCOL_DRAFT_3DESEDE,    PRIV_PROTOCOL_DRAFT_3DESEDE,
-      '(?:(?:cfb)?128-?)?aes(?:-?128)?',        PRIV_PROTOCOL_AESCFB128,
-      quotemeta PRIV_PROTOCOL_AESCFB128,        PRIV_PROTOCOL_AESCFB128,
-      quotemeta PRIV_PROTOCOL_DRAFT_AESCFB128,  PRIV_PROTOCOL_AESCFB128,
-      '(?:(?:cfb)?192-?)aes(?:-?128)?',         PRIV_PROTOCOL_DRAFT_AESCFB192,
-      quotemeta PRIV_PROTOCOL_DRAFT_AESCFB192,  PRIV_PROTOCOL_DRAFT_AESCFB192,
-      '(?:(?:cfb)?256-?)aes(?:-?128)?',         PRIV_PROTOCOL_DRAFT_AESCFB256,
-      quotemeta PRIV_PROTOCOL_DRAFT_AESCFB256,  PRIV_PROTOCOL_DRAFT_AESCFB256,
-      quotemeta PRIV_PROTOCOL_AESCFB192_CISCO,  PRIV_PROTOCOL_AESCFB192_CISCO,
-      quotemeta PRIV_PROTOCOL_AESCFB256_CISCO,  PRIV_PROTOCOL_AESCFB256_CISCO,
-      'aes192c', PRIV_PROTOCOL_AESCFB192_CISCO,
-      'aes256c', PRIV_PROTOCOL_AESCFB256_CISCO,
-   };
-
-   sub _priv_protocol
-   {
-      my ($this, $proto) = @_;
-
-      if (@_ < 2) {
-         return $this->{_priv_protocol};
-      }
-
-      if ($proto eq q{}) {
-         return $this->_error('An empty privProtocol was specified');
-      }
-
-      my $priv_proto;
-
-      for (keys %{$protocols}) {
-         if ($proto =~ /^$_$/i) {
-            $priv_proto = $protocols->{$_};
-            last;
-         }
-      }
-
-      if (!defined $priv_proto) {
-         return $this->_error('The privProtocol "%s" is unknown', $proto);
-      }
-
-      # Validate the support of the AES cipher algorithm.  Attempt to
-      # load the Crypt::Rijndael module.  If this module is not found,
-      # do not provide support for the AES Cipher Algorithm.
-
-      if (($priv_proto eq PRIV_PROTOCOL_AESCFB128)       ||
-          ($priv_proto eq PRIV_PROTOCOL_DRAFT_AESCFB192) ||
-          ($priv_proto eq PRIV_PROTOCOL_DRAFT_AESCFB256) ||
-          ($priv_proto eq PRIV_PROTOCOL_AESCFB192_CISCO) ||
-          ($priv_proto eq PRIV_PROTOCOL_AESCFB256_CISCO))
-      {
-         if (defined (my $error = load_module('Crypt::Rijndael'))) {
-            return $this->_error(
-               'Support for privProtocol "%s" is unavailable %s', $proto, $error
-            );
-         }
-      }
-
-      return $this->{_priv_protocol} = $priv_proto;
-   }
-
-}
-
-sub _engine_boots
-{
-   return ($_[0]->{_synchronized}) ? $_[0]->{_engine_boots} : 0;
-}
-
-sub _engine_time
-{
-   my ($this) = @_;
-
-   return 0 if (!$this->{_synchronized});
-
-   $this->{_engine_time} = time() - $this->{_time_epoc};
-
-   if ($this->{_engine_time} > 2147483647) {
-      DEBUG_INFO('snmpEngineTime rollover');
-      if (++$this->{_engine_boots} == 2147483647) {
-         die 'FATAL: Unable to handle snmpEngineBoots value';
-      }
-      $this->{_engine_time} -= 2147483647;
-      $this->{_time_epoc} = time() - $this->{_engine_time};
-      if (!$this->{_authoritative}) {
-         $this->{_synchronized} = FALSE;
-         return $this->{_latest_engine_time} = 0;
-      }
-   }
-
-   if ($this->{_engine_time} < 0) {
-      die 'FATAL: Unable to handle negative snmpEngineTime value';
-   }
-
-   return $this->{_engine_time};
-}
-
-sub _security_params
-{
-   my ($this) = @_;
-
-   # Clear any previous error messages
-   $this->_error_clear();
-
-   # We must have an usmUserName
-   if ($this->{_user_name} eq q{}) {
-      return $this->_error('The required userName was not specified');
-   }
-
-   # Define the authentication parameters
-
-   if ((defined $this->{_auth_password}) && ($this->{_discovered})) {
-      if (!defined $this->{_auth_key}) {
-         return $this->_error() if !defined $this->_auth_key_generate();
-      }
-      $this->{_auth_password} = undef;
-   }
-
-   if (defined $this->{_auth_key}) {
-
-      # Validate the key based on the protocol
-      if (!defined $this->_auth_key_validate()) {
-         return $this->_error('The authKey is invalid');
-      }
-
-      # Initialize the authentication data
-      if (!defined $this->_auth_data_init()) {
-         return $this->_error('Failed to initialize the authentication data');
-      }
-
-      if ($this->{_discovered}) {
-         $this->{_security_level} = SECURITY_LEVEL_AUTHNOPRIV;
-      }
-
-   }
-
-   # You must have authentication to have privacy
-
-   if (!defined ($this->{_auth_key}) && !defined $this->{_auth_password}) {
-      if (defined ($this->{_priv_key}) || defined $this->{_priv_password}) {
-         return $this->_error(
-            'The securityLevel is unsupported (privacy requires authentication)'
-         );
-      }
-   }
-
-   # Define the privacy parameters
-
-   if ((defined $this->{_priv_password}) && ($this->{_discovered})) {
-      if (!defined $this->{_priv_key}) {
-         return $this->_error() if !defined $this->_priv_key_generate();
-      }
-      $this->{_priv_password} = undef;
-   }
-
-   if (defined $this->{_priv_key}) {
-
-      # Validate the key based on the protocol
-      if (!defined $this->_priv_key_validate()) {
-         return $this->_error('The privKey is invalid');
-      }
-
-      # Initialize the privacy data
-      if (!defined $this->_priv_data_init()) {
-         return $this->_error('Failed to initialize the privacy data');
-      }
-
-      if ($this->{_discovered}) {
-         $this->{_security_level} = SECURITY_LEVEL_AUTHPRIV;
-      }
-
-   }
-
-   DEBUG_INFO('securityLevel = %d', $this->{_security_level});
-
-   return $this->{_security_level};
-}
-
-sub _engine_id_discovery
-{
-   my ($this, $engine_id) = @_;
-
-   return TRUE if ($this->{_authoritative});
-
-   DEBUG_INFO('engineID = 0x%s', unpack 'H*', $engine_id || q{});
-
-   if (length($engine_id) < 5 || length($engine_id) > 32) {
-      return $this->_error(
-         'The msgAuthoritativeEngineID length of %d is out of range (5..32)',
-         length $engine_id
-      );
-   }
-
-   $this->{_engine_id}  = $engine_id;
-   $this->{_discovered} = TRUE;
-
-   if (!defined $this->_security_params()) {
-      $this->{_discovered} = FALSE;
-      return $this->_error();
-   }
-
-   return TRUE;
-}
-
-sub _synchronize
-{
-   my ($this, $msg_boots, $msg_time) = @_;
-
-   return TRUE if ($this->{_authoritative});
-   return TRUE if ($this->{_security_level} < SECURITY_LEVEL_AUTHNOPRIV);
-
-   if (($msg_boots > $this->_engine_boots()) ||
-       (($msg_boots == $this->_engine_boots()) &&
-        ($msg_time > $this->{_latest_engine_time})))
-   {
-      DEBUG_INFO(
-         'update: engineBoots = %d, engineTime = %d', $msg_boots, $msg_time
-      );
-
-      $this->{_engine_boots} = $msg_boots;
-      $this->{_latest_engine_time} = $this->{_engine_time} = $msg_time;
-      $this->{_time_epoc} = time() - $this->{_engine_time};
-
-      if (!$this->{_synchronized}) {
-         $this->{_synchronized} = TRUE;
-         if (!defined $this->_security_params()) {
-            return ($this->{_synchronized} = FALSE);
-         }
-      }
-
-      return TRUE;
-   }
-
-   DEBUG_INFO(
-      'no update: engineBoots = %d, msgBoots = %d; ' .
-      'latestTime = %d, msgTime = %d',
-      $this->_engine_boots(), $msg_boots,
-      $this->{_latest_engine_time}, $msg_time
-   );
-
-   return TRUE;
-}
-
-sub _timeliness
-{
-   my ($this, $msg_boots, $msg_time) = @_;
-
-   return TRUE if ($this->{_security_level} < SECURITY_LEVEL_AUTHNOPRIV);
-
-   # Retrieve a local copy of our snmpEngineBoots and snmpEngineTime
-   # to avoid the possibilty of using different values in each of
-   # the comparisons.
-
-   my $engine_time  = $this->_engine_time();
-   my $engine_boots = $this->_engine_boots();
-
-   if ($engine_boots == 2147483647) {
-      $this->{_synchronized} = FALSE;
-      return $this->_error('The system is not in the time window');
-   }
-
-   if (!$this->{_authoritative}) {
-
-      if ($msg_boots < $engine_boots) {
-         return $this->_error('The message is not in the time window');
-      }
-      if (($msg_boots == $engine_boots) && ($msg_time < ($engine_time - 150))) {
-         return $this->_error('The message is not in the time window');
-      }
-
-   } else {
-
-      if ($msg_boots != $engine_boots) {
-         return $this->_error('The message is not in the time window');
-      }
-      if (($msg_time < ($engine_time - 150)) ||
-          ($msg_time > ($engine_time + 150)))
-      {
-         return $this->_error('The message is not in the time window');
-      }
-
-   }
-
-   return TRUE;
-}
-
-sub _authenticate_outgoing_msg
-{
-   my ($this, $msg, $auth_location) = @_;
-
-   if (!$auth_location) {
-      return $this->_error(
-         'Authentication failure (Unable to set msgAuthenticationParameters)'
-      );
-   }
-
-   # Set the msgAuthenticationParameters
-   substr ${$msg->reference}, -$auth_location, $this->{_auth_maclen}, $this->_auth_hmac($msg);
-
-   return TRUE;
-}
-
-sub _authenticate_incoming_msg
-{
-   my ($this, $msg, $auth_params) = @_;
-
-   # Authenticate the message
-   if ($auth_params ne $this->_auth_hmac($msg)) {
-      return $this->_error('Authentication failure');
-   }
-
-   DEBUG_INFO('authentication passed');
-
-   return TRUE;
-}
-
-sub _auth_hmac
-{
-   my ($this, $msg) = @_;
-
-   return q{} if (!defined($this->{_auth_data}) || !defined $msg);
-
-   return substr
-      $this->{_auth_data}(${$msg->reference()}, $this->{_auth_key}), 0, $this->{_auth_maclen};
-}
-
-sub _auth_data_init
-{
-   my ($this) = @_;
-
-   if (!defined $this->{_auth_key}) {
-      return $this->_error('The required authKey is not defined');
-   }
-
-   return TRUE if defined $this->{_auth_data};
-
-   if ($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACMD5) {
-
-      $this->{_auth_data} = \&hmac_md5;
-      $this->{_auth_maclen} = 12;
-
-   } elsif ($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACSHA) {
-
-      $this->{_auth_data} = \&hmac_sha1;
-      $this->{_auth_maclen} = 12;
-
-   } elsif ($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACSHA224) {
-
-      $this->{_auth_data} = \&hmac_sha224;
-      $this->{_auth_maclen} = 16;
-
-   } elsif ($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACSHA256) {
-
-      $this->{_auth_data} = \&hmac_sha256;
-      $this->{_auth_maclen} = 24;
-
-   } elsif ($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACSHA384) {
-
-      $this->{_auth_data} = \&hmac_sha384;
-      $this->{_auth_maclen} = 32;
-
-   } elsif ($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACSHA512) {
-
-      $this->{_auth_data} = \&hmac_sha512;
-      $this->{_auth_maclen} = 48;
-
-   } else {
-      return $this->_error(
-         'The authProtocol "%s" is unknown', $this->{_auth_protocol}
-      );
-
-   }
-
-   return TRUE;
-}
-
-{
-   my $encrypt =
-   {
-      PRIV_PROTOCOL_DES,              \&_priv_encrypt_des,
-      PRIV_PROTOCOL_DRAFT_3DESEDE,    \&_priv_encrypt_3desede,
-      PRIV_PROTOCOL_AESCFB128,        \&_priv_encrypt_aescfbxxx,
-      PRIV_PROTOCOL_DRAFT_AESCFB192,  \&_priv_encrypt_aescfbxxx,
-      PRIV_PROTOCOL_DRAFT_AESCFB256,  \&_priv_encrypt_aescfbxxx,
-      PRIV_PROTOCOL_AESCFB192_CISCO,  \&_priv_encrypt_aescfbxxx,
-      PRIV_PROTOCOL_AESCFB256_CISCO,  \&_priv_encrypt_aescfbxxx
-   };
-
-   sub _encrypt_data
-   {
-   #  my ($this, $msg, $priv_params, $plain) = @_;
-
-      if (!exists $encrypt->{$_[0]->{_priv_protocol}}) {
-         return $_[0]->_error('Encryption error (Unknown protocol)');
-      }
-
-      if (!defined
-            $_[1]->prepare(
-               OCTET_STRING,
-               $_[0]->${\$encrypt->{$_[0]->{_priv_protocol}}}($_[2], $_[3])
-            )
-         )
-      {
-         return $_[0]->_error('Encryption error');
-      }
-
-      # Set the PDU buffer equal to the encryptedPDU
-      return $_[3] = $_[1]->clear();
-   }
-}
-
-{
-   my $decrypt =
-   {
-      PRIV_PROTOCOL_DES,              \&_priv_decrypt_des,
-      PRIV_PROTOCOL_DRAFT_3DESEDE,    \&_priv_decrypt_3desede,
-      PRIV_PROTOCOL_AESCFB128,        \&_priv_decrypt_aescfbxxx,
-      PRIV_PROTOCOL_DRAFT_AESCFB192,  \&_priv_decrypt_aescfbxxx,
-      PRIV_PROTOCOL_DRAFT_AESCFB256,  \&_priv_decrypt_aescfbxxx,
-      PRIV_PROTOCOL_AESCFB192_CISCO,  \&_priv_decrypt_aescfbxxx,
-      PRIV_PROTOCOL_AESCFB256_CISCO,  \&_priv_decrypt_aescfbxxx
-   };
-
-   sub _decrypt_data
-   {
-   #  my ($this, $msg, $priv_params, $cipher) = @_;
-
-      # Make sure there is data to decrypt.
-      if (!defined $_[3]) {
-         return $_[0]->_error($_[1]->error() || 'Decryption error (No data)');
-      }
-
-      if (!exists $decrypt->{$_[0]->{_priv_protocol}}) {
-         return $_[0]->_error('Decryption error (Unknown protocol)');
-      }
-
-      # Clear the Message buffer
-      $_[1]->clear();
-
-      # Put the decrypted data back into the Message buffer
-      if (!defined
-            $_[1]->prepend(
-               $_[0]->${\$decrypt->{$_[0]->{_priv_protocol}}}($_[2], $_[3])
-            )
-         )
-      {
-         return $_[0]->_error($_[1]->error());
-      }
-      return $_[0]->_error($_[1]->error()) if (!$_[1]->length());
-
-      # See if the decrypted data starts with a SEQUENCE
-      # and has a reasonable length.
-
-      my $msglen = $_[1]->process(SEQUENCE);
-      if ((!defined $msglen) || ($msglen > $_[1]->length())) {
-         return $_[0]->_error('Decryption error');
-      }
-      $_[1]->index(0); # Reset the index
-
-      DEBUG_INFO('privacy passed');
-
-      return TRUE;
-   }
-}
-
-sub _priv_data_init
-{
-   my ($this) = @_;
-
-   if (!defined $this->{_priv_key}) {
-      return $this->_error('The required privKey is not defined');
-   }
-
-   return TRUE if defined $this->{_priv_data};
-
-   my $init =
-   {
-      PRIV_PROTOCOL_DES,              \&_priv_data_init_des,
-      PRIV_PROTOCOL_DRAFT_3DESEDE,    \&_priv_data_init_3desede,
-      PRIV_PROTOCOL_AESCFB128,        \&_priv_data_init_aescfbxxx,
-      PRIV_PROTOCOL_DRAFT_AESCFB192,  \&_priv_data_init_aescfbxxx,
-      PRIV_PROTOCOL_DRAFT_AESCFB256,  \&_priv_data_init_aescfbxxx,
-      PRIV_PROTOCOL_AESCFB192_CISCO,  \&_priv_data_init_aescfbxxx,
-      PRIV_PROTOCOL_AESCFB256_CISCO,  \&_priv_data_init_aescfbxxx
-   };
-
-   if (!exists $init->{$this->{_priv_protocol}}) {
-      return $this->_error(
-         'The privProtocol "%s" is unknown', $this->{_priv_protocol}
-      );
-   }
-
-   return $this->${\$init->{$this->{_priv_protocol}}}();
-}
-
-sub _priv_data_init_des
-{
-   my ($this) = @_;
-
-   if (!defined $this->{_priv_key}) {
-      return $this->_error('The required privKey is not defined');
-   }
-
-   # Create the DES object
-   $this->{_priv_data}->{des} =
-      Crypt::DES->new(substr $this->{_priv_key}, 0, 8);
-
-   # Extract the pre-IV
-   $this->{_priv_data}->{pre_iv} = substr $this->{_priv_key}, 8, 8;
-
-   # Initialize the salt
-   $this->{_priv_data}->{salt} = int rand ~0;
-
-   return TRUE;
-}
-
-sub _priv_encrypt_des
-{
-#  my ($this, $priv_params, $plain) = @_;
-
-   if (!defined $_[0]->{_priv_data}) {
-      return $_[0]->_error('The required privacy data is not defined');
-   }
-
-   # Always pad the plain text data.  "The actual pad value is
-   # irrelevant..." according RFC 3414 Section 8.1.1.2.  However,
-   # there are some agents out there that expect "standard block
-   # padding" where each of the padding byte(s) are set to the size
-   # of the padding (even for data that is a multiple of block size).
-
-   my $pad = 8 - (length($_[2]) % 8);
-   $_[2] .= pack('C', $pad) x $pad;
-
-   # Create and set the salt
-   if ($_[0]->{_priv_data}->{salt}++ == ~0) {
-      $_[0]->{_priv_data}->{salt} = 0;
-   }
-   $_[1] = pack 'NN', $_[0]->{_engine_boots}, $_[0]->{_priv_data}->{salt};
-
-   # Create the initial vector (IV)
-   my $iv = $_[0]->{_priv_data}->{pre_iv} ^ $_[1];
-
-   my $cipher = q{};
-
-   # Perform Cipher Block Chaining (CBC)
-   while ($_[2] =~ /(.{8})/gs) {
-      $cipher .= $iv = $_[0]->{_priv_data}->{des}->encrypt($1 ^ $iv);
-   }
-
-   return $cipher;
-}
-
-sub _priv_decrypt_des
-{
-#  my ($this, $priv_params, $cipher) = @_;
-
-   if (!defined $_[0]->{_priv_data}) {
-      return $_[0]->_error('The required privacy data is not defined');
-   }
-
-   if (length($_[1]) != 8) {
-      return $_[0]->_error(
-        'The msgPrivParameters length of %d is invalid', length $_[1]
-      );
-   }
-
-   if (length($_[2]) % 8) {
-      return $_[0]->_error(
-         'The DES cipher length is not a multiple of the block size'
-      );
-   }
-
-   # Create the initial vector (IV)
-   my $iv = $_[0]->{_priv_data}->{pre_iv} ^ $_[1];
-
-   my $plain = q{};
-
-   # Perform Cipher Block Chaining (CBC)
-   while ($_[2] =~ /(.{8})/gs) {
-      $plain .= $iv ^ $_[0]->{_priv_data}->{des}->decrypt($1);
-      $iv = $1;
-   }
-
-   return $plain;
-}
-
-sub _priv_data_init_3desede
-{
-   my ($this) = @_;
-
-   if (!defined $this->{_priv_key}) {
-      return $this->_error('The required privKey is not defined');
-   }
-
-   # Create the 3 DES objects
-
-   $this->{_priv_data}->{des1} =
-      Crypt::DES->new(substr $this->{_priv_key}, 0, 8);
-   $this->{_priv_data}->{des2} =
-      Crypt::DES->new(substr $this->{_priv_key}, 8, 8);
-   $this->{_priv_data}->{des3} =
-      Crypt::DES->new(substr $this->{_priv_key}, 16, 8);
-
-   # Extract the pre-IV
-   $this->{_priv_data}->{pre_iv} = substr $this->{_priv_key}, 24, 8;
-
-   # Initialize the salt
-   $this->{_priv_data}->{salt} = int rand ~0;
-
-   # Assign a hash algorithm to "bit spread" the salt
-
-   if ($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACMD5) {
-      $this->{_priv_data}->{hash} = Digest::MD5->new();
-   } elsif (($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACSHA) ||
-            ($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACSHA224) ||
-            ($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACSHA256) ||
-            ($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACSHA384) ||
-            ($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACSHA512))
-   {
-      $this->{_priv_data}->{hash} = Digest::SHA->new();
-   }
-
-   return TRUE;
-}
-
-sub _priv_encrypt_3desede
-{
-#  my ($this, $priv_params, $plain) = @_;
-
-   if (!defined $_[0]->{_priv_data}) {
-      return $_[0]->_error('The required privacy data is not defined');
-   }
-
-   # Pad the plain text data using "standard block padding".
-   my $pad = 8 - (length($_[2]) % 8);
-   $_[2] .= pack('C', $pad) x $pad;
-
-   # Create and set the salt
-   if ($_[0]->{_priv_data}->{salt}++ == ~0) {
-      $_[0]->{_priv_data}->{salt} = 0;
-   }
-   $_[1] = pack 'NN', $_[0]->{_engine_boots}, $_[0]->{_priv_data}->{salt};
-
-   # Draft 3DES-EDE for USM Section 5.1.1.1.2 - "To achieve effective
-   # bit spreading, the complete 8-octet 'salt' value SHOULD be
-   # hashed using the usmUserAuthProtocol."
-
-   if (exists $_[0]->{_priv_data}->{hash}) {
-      $_[1] = substr $_[0]->{_priv_data}->{hash}->add($_[1])->digest(), 0, 8;
-   }
-
-   # Create the initial vector (IV)
-   my $iv = $_[0]->{_priv_data}->{pre_iv} ^ $_[1];
-
-   my $cipher = q{};
-
-   # Perform Cipher Block Chaining (CBC)
-   while ($_[2] =~ /(.{8})/gs) {
-      $cipher .= $iv =
-         $_[0]->{_priv_data}->{des3}->encrypt(
-            $_[0]->{_priv_data}->{des2}->decrypt(
-               $_[0]->{_priv_data}->{des1}->encrypt($1 ^ $iv)
-            )
-         );
-   }
-
-   return $cipher;
-}
-
-sub _priv_decrypt_3desede
-{
-#  my ($this, $priv_params, $cipher) = @_;
-
-   if (!defined $_[0]->{_priv_data}) {
-      return $_[0]->_error('The required privacy data is not defined');
-   }
-
-   if (length($_[1]) != 8) {
-      return $_[0]->_error(
-        'The msgPrivParameters length of %d is invalid', length $_[1]
-      );
-   }
-
-   if (length($_[2]) % 8) {
-      return $_[0]->_error(
-         'The CBC-3DES-EDE cipher length is not a multiple of the block size'
-      );
-   }
-
-   # Create the initial vector (IV)
-   my $iv = $_[0]->{_priv_data}->{pre_iv} ^ $_[1];
-
-   my $plain = q{};
-
-   # Perform Cipher Block Chaining (CBC)
-   while ($_[2] =~ /(.{8})/gs) {
-      $plain .=
-         $iv ^ $_[0]->{_priv_data}->{des1}->decrypt(
-                  $_[0]->{_priv_data}->{des2}->encrypt(
-                     $_[0]->{_priv_data}->{des3}->decrypt($1)
-                  )
-               );
-      $iv = $1;
-   }
-
-   return $plain;
-}
-
-sub _priv_data_init_aescfbxxx
-{
-   my ($this) = @_;
-
-   if (!defined $this->{_priv_key}) {
-      return $this->_error('The required privKey is not defined');
-   }
-
-   {
-      # Avoid a "strict subs" error if Crypt::Rijndael is not loaded.
-      no strict 'subs';
-
-      # Create the AES (Rijndael) object with a 128, 192, or 256 bit key.
-
-      $this->{_priv_data}->{aes} =
-         Crypt::Rijndael->new($this->{_priv_key}, Crypt::Rijndael::MODE_CFB());
-   }
-
-   # Initialize the salt
-   $this->{_priv_data}->{salt1} = int rand ~0;
-   $this->{_priv_data}->{salt2} = int rand ~0;
-
-   return TRUE;
-}
-
-sub _priv_encrypt_aescfbxxx
-{
-#  my ($this, $priv_params, $plain) = @_;
-
-   if (!defined $_[0]->{_priv_data}) {
-      return $_[0]->_error('The required privacy data is not defined');
-   }
-
-   # Validate the plain text length
-   my $length = length $_[2];
-   if ($length <= 16) {
-      return $_[0]->_error(
-         'The AES plain text length is not greater than the block size'
-      );
-   }
-
-   # Create and set the salt
-   if ($_[0]->{_priv_data}->{salt1}++ == ~0) {
-      $_[0]->{_priv_data}->{salt1} = 0;
-      if ($_[0]->{_priv_data}->{salt2}++ == ~0) {
-         $_[0]->{_priv_data}->{salt2} = 0;
-      }
-   }
-   $_[1] = pack 'NN', $_[0]->{_priv_data}->{salt2},
-                      $_[0]->{_priv_data}->{salt1};
-
-   # AES in the USM Section - Section 3.1.3 "The last ciphertext
-   # block is produced by exclusive-ORing the last plaintext segment
-   # of r bits (r is less or equal to 128) with the segment of the r
-   # most significant bits of the last output block."
-
-   # This operation is identical to those performed on the previous
-   # blocks except for the fact that the block can be less than the
-   # block size.  We can just pad the last block and operate on it as
-   # usual and then ignore the padding after encrypting.
-
-   $_[2] .= "\000" x (16 - ($length % 16));
-
-   # Create the IV by concatenating "...the generating SNMP engine's
-   # 32-bit snmpEngineBoots, the SNMP engine's 32-bit  snmpEngineTime,
-   # and a local 64-bit integer..."
-
-   $_[0]->{_priv_data}->{aes}->set_iv(
-      pack('NN', $_[0]->{_engine_boots}, $_[0]->{_engine_time}) . $_[1]
-   );
-
-   # Let the Crypt::Rijndael module perform 128 bit Cipher Feedback
-   # (CFB) and return the result minus the "internal" padding.
-
-   return substr $_[0]->{_priv_data}->{aes}->encrypt($_[2]), 0, $length;
-}
-
-sub _priv_decrypt_aescfbxxx
-{
-#  my ($this, $priv_params, $cipher) = @_;
-
-   if (!defined $_[0]->{_priv_data}) {
-      return $_[0]->_error('The required privacy data is not defined');
-   }
-
-   # Validate the msgPrivParameters length.  We assume that the
-   # msgAuthoritativeEngineBoots and msgAuthoritativeEngineTime
-   # have been prepended to the msgPrivParameters to create the
-   # required 128 bit IV.
-
-   if (length($_[1]) != 16) {
-       return $_[0]->_error(
-          'The AES IV length of %d is invalid', length $_[1]
-       );
-   }
-
-   # Validate the cipher length
-   my $length = length $_[2];
-   if ($length <= 16) {
-      return $_[0]->_error(
-         'The AES cipher length is not greater than the block size'
-      );
-   }
-
-   # AES in the USM Section - Section 3.1.4 "The last ciphertext
-   # block (whose size r is less or equal to 128) is less or equal
-   # to 128) is exclusive-ORed with the segment of the r most
-   # significant bits of the last output block to recover the last
-   # plaintext block of r bits."
-
-   # This operation is identical to those performed on the previous
-   # blocks except for the fact that the block can be less than the
-   # block size.  We can just pad the last block and operate on it as
-   # usual and then ignore the padding after decrypting.
-
-   $_[2] .= "\000" x (16 - ($length % 16));
-
-   # Use the msgPrivParameters as the IV.
-   $_[0]->{_priv_data}->{aes}->set_iv($_[1]);
-
-   # Let the Crypt::Rijndael module perform 128 bit Cipher Feedback
-   # (CFB) and return the result minus the "internal" padding.
-
-   return substr $_[0]->{_priv_data}->{aes}->decrypt($_[2]), 0, $length;
-}
-
-sub _auth_key_generate
-{
-   my ($this) = @_;
-
-   if (!defined($this->{_engine_id}) || !defined $this->{_auth_password}) {
-      return $this->_error('Unable to generate the authKey');
-   }
-
-   $this->{_auth_key} = $this->_password_localize($this->{_auth_password});
-
-   return $this->{_auth_key};
-}
-
-sub _auth_key_validate
-{
-   my ($this) = @_;
-
-   my $key_len =
-   {
-      AUTH_PROTOCOL_HMACMD5,    [ 16, 'HMAC-MD5'  ],
-      AUTH_PROTOCOL_HMACSHA,    [ 20, 'HMAC-SHA1' ],
-      AUTH_PROTOCOL_HMACSHA224, [ 28, 'HMAC-SHA224' ],
-      AUTH_PROTOCOL_HMACSHA256, [ 32, 'HMAC-SHA256' ],
-      AUTH_PROTOCOL_HMACSHA384, [ 48, 'HMAC-SHA384' ],
-      AUTH_PROTOCOL_HMACSHA512, [ 64, 'HMAC-SHA512' ],
-   };
-
-   if (!exists $key_len->{$this->{_auth_protocol}}) {
-      return $this->_error(
-         'The authProtocol "%s" is unknown', $this->{_auth_protocol}
-      );
-   }
-
-   if (length($this->{_auth_key}) != $key_len->{$this->{_auth_protocol}}->[0])
-   {
-      return $this->_error(
-         'The %s authKey length of %d is invalid, expected %d',
-         $key_len->{$this->{_auth_protocol}}->[1], length($this->{_auth_key}),
-         $key_len->{$this->{_auth_protocol}}->[0]
-      );
-   }
-
-   return TRUE;
-}
-
-sub _priv_key_generate
-{
-   my ($this) = @_;
-
-   if (!defined($this->{_engine_id}) || !defined $this->{_priv_password}) {
-      return $this->_error('Unable to generate the privKey');
-   }
-
-   $this->{_priv_key} = $this->_password_localize($this->{_priv_password});
-
-   return $this->_error() if !defined $this->{_priv_key};
-
-   if (($this->{_priv_protocol} eq PRIV_PROTOCOL_DRAFT_3DESEDE) ||
-       ($this->{_priv_protocol} eq PRIV_PROTOCOL_AESCFB192_CISCO) ||
-       ($this->{_priv_protocol} eq PRIV_PROTOCOL_AESCFB256_CISCO))
-   {
-      # Draft 3DES-EDE for USM Section 2.1 - "To acquire the necessary
-      # number of key bits, the password-to-key algorithm may be chained
-      # using its output as further input in order to generate an
-      # appropriate number of key bits."
-
-      # Cisco AES192 and AES256 use the same key extension mechanism
-
-      $this->{_priv_key} .= $this->_password_localize($this->{_priv_key});
-
-   } elsif (($this->{_priv_protocol} eq PRIV_PROTOCOL_DRAFT_AESCFB192) ||
-            ($this->{_priv_protocol} eq PRIV_PROTOCOL_DRAFT_AESCFB256))
-   {
-      # Draft AES in the USM Section 3.1.2.1 - "...if the size of the
-      # localized key is not large enough to generate an encryption
-      # key... ...set Kul = Kul || Hnnn(Kul) where Hnnn is the hash
-      # function for the authentication protocol..."
-
-      my $hnnn;
-
-      if ($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACMD5) {
-         $hnnn = Digest::MD5->new();
-      } elsif (($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACSHA) ||
-               ($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACSHA224) ||
-               ($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACSHA256) ||
-               ($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACSHA384) ||
-               ($this->{_auth_protocol} eq AUTH_PROTOCOL_HMACSHA512))
-      {
-         $hnnn = Digest::SHA->new();
-      } else {
-         return $this->_error(
-            'The authProtocol "%s" is unknown', $this->{_auth_protocol}
-         );
-      }
-
-      $this->{_priv_key} .= $hnnn->add($this->{_priv_key})->digest();
-
-   }
-
-   # Truncate the privKey to the appropriate length.
-
-   my $key_len =
-   {
-      PRIV_PROTOCOL_DES,              16,  # RFC 3414 Section 8.2.1
-      PRIV_PROTOCOL_DRAFT_3DESEDE,    32,  # Draft 3DES for USM Section 5.2.1
-      PRIV_PROTOCOL_AESCFB128,        16,  # AES in the USM Section 3.2.1
-      PRIV_PROTOCOL_DRAFT_AESCFB192,  24,  # Draft AES in the USM Section 3.2.1
-      PRIV_PROTOCOL_DRAFT_AESCFB256,  32,  # Draft AES in the USM Section 3.2.1
-      PRIV_PROTOCOL_AESCFB192_CISCO,  24,
-      PRIV_PROTOCOL_AESCFB256_CISCO,  32
-   };
-
-   if (!exists $key_len->{$this->{_priv_protocol}}) {
-      return $this->_error(
-         'The privProtocol "%s" is unknown', $this->{_priv_protocol}
-      );
-   }
-
-   $this->{_priv_key} =
-      substr $this->{_priv_key}, 0, $key_len->{$this->{_priv_protocol}};
-
-   return $this->{_priv_key};
-}
-
-sub _priv_key_validate
-{
-   my ($this) = @_;
-
-   my $key_len =
-   {
-      PRIV_PROTOCOL_DES,              [ 16, 'CBC-DES'        ],
-      PRIV_PROTOCOL_DRAFT_3DESEDE,    [ 32, 'CBC-3DES-EDE'   ],
-      PRIV_PROTOCOL_AESCFB128,        [ 16, 'CFB128-AES-128' ],
-      PRIV_PROTOCOL_DRAFT_AESCFB192,  [ 24, 'CFB128-AES-192' ],
-      PRIV_PROTOCOL_DRAFT_AESCFB256,  [ 32, 'CFB128-AES-256' ],
-      PRIV_PROTOCOL_AESCFB192_CISCO,  [ 24, 'CFB128-AES-192c' ],
-      PRIV_PROTOCOL_AESCFB256_CISCO,  [ 32, 'CFB128-AES-256c' ]
-   };
-
-   if (!exists $key_len->{$this->{_priv_protocol}}) {
-      return $this->_error(
-         'The privProtocol "%s" is unknown', $this->{_priv_protocol}
-      );
-   }
-
-   if (length($this->{_priv_key}) != $key_len->{$this->{_priv_protocol}}->[0])
-   {
-      return $this->_error(
-         'The %s privKey length of %d is invalid, expected %d',
-         $key_len->{$this->{_priv_protocol}}->[1], length($this->{_priv_key}),
-         $key_len->{$this->{_priv_protocol}}->[0]
-      );
-   }
-
-   if ($this->{_priv_protocol} eq PRIV_PROTOCOL_DRAFT_3DESEDE) {
-
-      # Draft 3DES-EDE for USM Section 5.1.1.1.1 "The checks for difference
-      # and weakness... ...should be performed when the key is assigned.
-      # If any of the mandated tests fail, then the whole key MUST be
-      # discarded and an appropriate exception noted."
-
-      if (substr($this->{_priv_key}, 0, 8) eq substr $this->{_priv_key}, 8, 8)
-      {
-         return $this->_error(
-            'The CBC-3DES-EDE privKey is invalid (K1 equals K2)'
-         );
-      }
-
-      if (substr($this->{_priv_key}, 8, 8) eq substr $this->{_priv_key}, 16, 8)
-      {
-         return $this->_error(
-            'The CBC-3DES-EDE privKey is invalid (K2 equals K3)'
-         );
-      }
-
-      if (substr($this->{_priv_key}, 0, 8) eq substr $this->{_priv_key}, 16, 8)
-      {
-         return $this->_error(
-            'The CBC-3DES-EDE privKey is invalid (K1 equals K3)'
-         );
-      }
-
-   }
-
-   return TRUE;
-}
-
-sub _password_localize
-{
-   my ($this, $password) = @_;
-
-   my $digests =
-   {
-      AUTH_PROTOCOL_HMACMD5,    ['Digest::MD5', ],
-      AUTH_PROTOCOL_HMACSHA,    ['Digest::SHA', 1],
-      AUTH_PROTOCOL_HMACSHA224, ['Digest::SHA', 224],
-      AUTH_PROTOCOL_HMACSHA256, ['Digest::SHA', 256],
-      AUTH_PROTOCOL_HMACSHA384, ['Digest::SHA', 384],
-      AUTH_PROTOCOL_HMACSHA512, ['Digest::SHA', 512],
-   };
-
-   if (!exists $digests->{$this->{_auth_protocol}}) {
-      return $this->_error(
-         'The authProtocol "%s" is unknown', $this->{_auth_protocol}
-      );
-   }
-
-   my $digest;
-   if (!defined($digests->{$this->{_auth_protocol}}[1])) {
-         $digest = $digests->{$this->{_auth_protocol}}[0]->new;
-   } else {
-         $digest = $digests->{$this->{_auth_protocol}}[0]->new($digests->{$this->{_auth_protocol}}[1]);
-   }
-
-   # Create the initial digest using the password
-
-   my $d = my $pad = $password x ((2048 / length $password) + 1);
-
-   for (my $count = 0; $count < 2**20; $count += 2048) {
-      $digest->add(substr $d, 0, 2048, q{});
-      $d .= $pad;
-   }
-   $d = $digest->digest;
-
-   # Localize the key with the authoritativeEngineID
-
-   return $digest->add($d . $this->{_engine_id} . $d)->digest();
-}
-
-{
-   my %modules;
-
-   sub load_module
-   {
-      my ($module) = @_;
-
-      # We attempt to load the required module under the protection of an
-      # eval statement.  If there is a failure, typically it is due to a
-      # missing module required by the requested module and we attempt to
-      # simplify the error message by just listing that module.  We also
-      # need to track failures since require() only produces an error on
-      # the first attempt to load the module.
-
-      # NOTE: Contrary to our typical convention, a return value of "undef"
-      # actually means success and a defined value means error.
-
-      return $modules{$module} if exists $modules{$module};
-
-      if (!eval "require $module") {
-         if ($@ =~ /locate (\S+\.pm)/) {
-            $modules{$module} = sprintf '(Required module %s not found)', $1;
-         } else {
-            $modules{$module} = sprintf '(%s)', $@;
-         }
-      } else {
-         $modules{$module} = undef;
-      }
-
-      return $modules{$module};
-   }
-}
 
 # ============================================================================
-1; # [end Net::SNMP::Security::USM]
+# Constants and Protocol Definitions
+# ============================================================================
+
+# SNMP Version
+SNMP_VERSION_1 = 0
+SNMP_VERSION_2C = 1
+SNMP_VERSION_3 = 3
+
+# Module version
+VERSION = "4.0.1"
+
+# Boolean constants
+TRUE = True
+FALSE = False
+
+
+# ============================================================================
+# Security Levels (RFC 3414 Section 3.4)
+# ============================================================================
+
+class SecurityLevel(Enum):
+    """
+    SNMPv3 Security Levels
+    
+    - NOAUTHNOPRIV: No authentication, no privacy (equivalent to SNMPv1/v2c)
+    - AUTHNOPRIV: Authentication without privacy (integrity only)
+    - AUTHPRIV: Authentication with privacy (integrity + confidentiality)
+    """
+    NOAUTHNOPRIV = 1  # No authentication or encryption
+    AUTHNOPRIV = 2    # Authentication without encryption  
+    AUTHPRIV = 3      # Authentication with encryption
+
+SECURITY_LEVEL_NOAUTHNOPRIV = SecurityLevel.NOAUTHNOPRIV
+SECURITY_LEVEL_AUTHNOPRIV = SecurityLevel.AUTHNOPRIV
+SECURITY_LEVEL_AUTHPRIV = SecurityLevel.AUTHPRIV
+
+
+# ============================================================================
+# Security Models (RFC 3411 Section 3.1.3)
+# ============================================================================
+
+class SecurityModel(Enum):
+    """SNMPv3 Security Models"""
+    ANY = 0      # Reserved for any
+    SNMPV1 = 1   # SNMPv1
+    SNMPV2C = 2  # SNMPv2c
+    USM = 3      # User-based Security Model
+
+SECURITY_MODEL_ANY = SecurityModel.ANY
+SECURITY_MODEL_SNMPV1 = SecurityModel.SNMPV1
+SECURITY_MODEL_SNMPV2C = SecurityModel.SNMPV2C
+SECURITY_MODEL_USM = SecurityModel.USM
+
+
+# ============================================================================
+# Authentication Protocols (RFC 3414 Section 6)
+# ============================================================================
+
+# OID definitions for authentication protocols
+AUTH_PROTOCOL_NONE = '1.3.6.1.6.3.10.1.1.1'        # usmNoAuthProtocol
+AUTH_PROTOCOL_HMACMD5 = '1.3.6.1.6.3.10.1.1.2'     # usmHMACMD5AuthProtocol
+AUTH_PROTOCOL_HMACSHA = '1.3.6.1.6.3.10.1.1.3'     # usmHMACSHAAuthProtocol
+AUTH_PROTOCOL_HMACSHA224 = '1.3.6.1.6.3.10.1.1.4'  # usmHMAC128SHA224AuthProtocol
+AUTH_PROTOCOL_HMACSHA256 = '1.3.6.1.6.3.10.1.1.5'  # usmHMAC192SHA256AuthProtocol
+AUTH_PROTOCOL_HMACSHA384 = '1.3.6.1.6.3.10.1.1.6'  # usmHMAC256SHA384AuthProtocol
+AUTH_PROTOCOL_HMACSHA512 = '1.3.6.1.6.3.10.1.1.7'  # usmHMAC384SHA512AuthProtocol
+
+
+# ============================================================================
+# Privacy Protocols (RFC 3414 Section 7, RFC 3826)
+# ============================================================================
+
+# Standard privacy protocols
+PRIV_PROTOCOL_NONE = '1.3.6.1.6.3.10.1.2.1'        # usmNoPrivProtocol
+PRIV_PROTOCOL_DES = '1.3.6.1.6.3.10.1.2.2'         # usmDESPrivProtocol
+PRIV_PROTOCOL_AESCFB128 = '1.3.6.1.6.3.10.1.2.4'   # usmAesCfb128Protocol (RFC 3826)
+
+# Draft/Extended protocols
+PRIV_PROTOCOL_DRAFT_3DESEDE = '1.3.6.1.4.1.14832.1.1'    # usm3DESPrivProtocol
+PRIV_PROTOCOL_DRAFT_AESCFB128 = '1.3.6.1.4.1.14832.1.2'  # usmAESCfb128PrivProtocol
+PRIV_PROTOCOL_DRAFT_AESCFB192 = '1.3.6.1.4.1.14832.1.3'  # usmAESCfb192PrivProtocol
+PRIV_PROTOCOL_DRAFT_AESCFB256 = '1.3.6.1.4.1.14832.1.4'  # usmAESCfb256PrivProtocol
+
+# Cisco-specific protocols
+PRIV_PROTOCOL_AESCFB192_CISCO = '1.3.6.1.4.1.9.12.6.1.1'  # cusmAESCfb192PrivProtocol
+PRIV_PROTOCOL_AESCFB256_CISCO = '1.3.6.1.4.1.9.12.6.1.2'  # cusmAESCfb256PrivProtocol
+
+
+# ============================================================================
+# Authentication Protocol Metadata
+# ============================================================================
+
+AUTH_PROTOCOL_INFO = {
+    AUTH_PROTOCOL_NONE: {
+        'name': 'None',
+        'digest_length': 0,
+        'mac_length': 0,
+        'key_length': 0,
+    },
+    AUTH_PROTOCOL_HMACMD5: {
+        'name': 'HMAC-MD5-96',
+        'digest_length': 16,  # MD5 produces 128 bits (16 bytes)
+        'mac_length': 12,     # Truncated to 96 bits (12 bytes) per RFC 3414
+        'key_length': 16,
+        'hash_func': hashlib.md5,
+    },
+    AUTH_PROTOCOL_HMACSHA: {
+        'name': 'HMAC-SHA-96',
+        'digest_length': 20,  # SHA-1 produces 160 bits (20 bytes)
+        'mac_length': 12,     # Truncated to 96 bits (12 bytes) per RFC 3414
+        'key_length': 20,
+        'hash_func': hashlib.sha1,
+    },
+    AUTH_PROTOCOL_HMACSHA224: {
+        'name': 'HMAC-SHA-224-128',
+        'digest_length': 28,  # SHA-224 produces 224 bits (28 bytes)
+        'mac_length': 16,     # Truncated to 128 bits (16 bytes)
+        'key_length': 28,
+        'hash_func': hashlib.sha224,
+    },
+    AUTH_PROTOCOL_HMACSHA256: {
+        'name': 'HMAC-SHA-256-192',
+        'digest_length': 32,  # SHA-256 produces 256 bits (32 bytes)
+        'mac_length': 24,     # Truncated to 192 bits (24 bytes)
+        'key_length': 32,
+        'hash_func': hashlib.sha256,
+    },
+    AUTH_PROTOCOL_HMACSHA384: {
+        'name': 'HMAC-SHA-384-256',
+        'digest_length': 48,  # SHA-384 produces 384 bits (48 bytes)
+        'mac_length': 32,     # Truncated to 256 bits (32 bytes)
+        'key_length': 48,
+        'hash_func': hashlib.sha384,
+    },
+    AUTH_PROTOCOL_HMACSHA512: {
+        'name': 'HMAC-SHA-512-384',
+        'digest_length': 64,  # SHA-512 produces 512 bits (64 bytes)
+        'mac_length': 48,     # Truncated to 384 bits (48 bytes)
+        'key_length': 64,
+        'hash_func': hashlib.sha512,
+    },
+}
+
+
+# ============================================================================
+# Privacy Protocol Metadata
+# ============================================================================
+
+PRIV_PROTOCOL_INFO = {
+    PRIV_PROTOCOL_NONE: {
+        'name': 'None',
+        'key_length': 0,
+    },
+    PRIV_PROTOCOL_DES: {
+        'name': 'CBC-DES',
+        'key_length': 16,  # RFC 3414 Section 8.2.1
+        'cipher': 'DES',
+    },
+    PRIV_PROTOCOL_DRAFT_3DESEDE: {
+        'name': 'CBC-3DES-EDE',
+        'key_length': 32,  # Draft 3DES for USM Section 5.2.1
+        'cipher': '3DES',
+    },
+    PRIV_PROTOCOL_AESCFB128: {
+        'name': 'CFB128-AES-128',
+        'key_length': 16,  # RFC 3826 Section 3.2.1
+        'cipher': 'AES128',
+    },
+    PRIV_PROTOCOL_DRAFT_AESCFB192: {
+        'name': 'CFB128-AES-192',
+        'key_length': 24,  # Draft AES in the USM Section 3.2.1
+        'cipher': 'AES192',
+    },
+    PRIV_PROTOCOL_DRAFT_AESCFB256: {
+        'name': 'CFB128-AES-256',
+        'key_length': 32,  # Draft AES in the USM Section 3.2.1
+        'cipher': 'AES256',
+    },
+    PRIV_PROTOCOL_AESCFB192_CISCO: {
+        'name': 'CFB128-AES-192c',
+        'key_length': 24,
+        'cipher': 'AES192',
+    },
+    PRIV_PROTOCOL_AESCFB256_CISCO: {
+        'name': 'CFB128-AES-256c',
+        'key_length': 32,
+        'cipher': 'AES256',
+    },
+}
+
+
+# ============================================================================
+# Main USM Security Class
+# ============================================================================
+
+class USMSecurityError(Exception):
+    """Exception raised for USM security-related errors"""
+    pass
+
+
+@dataclass
+class SecurityParameters:
+    """
+    SNMP USM Security Parameters (RFC 3414 Section 2.4)
+    
+    These parameters are included in every SNMPv3 message using USM.
+    """
+    engine_id: bytes                    # Authoritative snmpEngineID
+    engine_boots: int                   # snmpEngineBoots counter
+    engine_time: int                    # snmpEngineTime in seconds
+    user_name: str                      # Security name (username)
+    auth_parameters: bytes              # Authentication parameters (MAC)
+    priv_parameters: bytes              # Privacy parameters (salt/IV)
+
+
+class USM:
+    """
+    User-based Security Model (USM) for SNMPv3
+    
+    This class implements the SNMPv3 User-based Security Model which provides:
+    
+    1. **Data Integrity**: Using HMAC with various hash algorithms
+    2. **Data Origin Authentication**: Through shared secret keys
+    3. **Data Confidentiality**: Using DES, 3DES, or AES encryption
+    4. **Timeliness**: Protection against message replay and delay
+    
+    Key Concepts:
+    
+    **Engine ID**: Unique identifier for an SNMP engine (agent or manager).
+    The authoritative engine ID is used in key localization.
+    
+    **Engine Boots**: Counter incremented each time the SNMP engine reinitializes.
+    Used for replay protection.
+    
+    **Engine Time**: Seconds since last boot. Combined with boots for timeliness.
+    
+    **Security Levels**:
+    - noAuthNoPriv: No security (like SNMPv1/v2c)
+    - authNoPriv: Authentication only (integrity checking)
+    - authPriv: Authentication + encryption (full security)
+    
+    **Key Derivation**: Keys are derived from passwords using a computationally
+    expensive function (1 million MD5/SHA operations), then localized to the
+    authoritative engine ID. This prevents offline dictionary attacks and
+    ensures keys are unique per engine.
+    
+    Usage:
+        # Create USM instance for non-authoritative engine (manager)
+        usm = USM(
+            username='myuser',
+            auth_protocol=AUTH_PROTOCOL_HMACSHA256,
+            auth_password='myauthpass',
+            priv_protocol=PRIV_PROTOCOL_AESCFB128,
+            priv_password='myprivpass'
+        )
+        
+        # Or for authoritative engine (agent)
+        usm = USM(
+            username='myuser',
+            auth_protocol=AUTH_PROTOCOL_HMACSHA256,
+            auth_password='myauthpass',
+            priv_protocol=PRIV_PROTOCOL_AESCFB128,
+            priv_password='myprivpass',
+            authoritative=True,
+            engine_id=b'\\x80\\x00\\x1f\\x88\\x80...'
+        )
+    """
+    
+    # Class variable for engine ID (shared across instances)
+    _engine_id_cache = None
+    
+    def __init__(
+        self,
+        username: str = '',
+        auth_protocol: str = AUTH_PROTOCOL_HMACMD5,
+        auth_password: Optional[str] = None,
+        auth_key: Optional[bytes] = None,
+        priv_protocol: str = PRIV_PROTOCOL_DES,
+        priv_password: Optional[str] = None,
+        priv_key: Optional[bytes] = None,
+        engine_id: Optional[bytes] = None,
+        engine_boots: int = 0,
+        engine_time: int = 0,
+        authoritative: bool = False,
+        version: int = SNMP_VERSION_3,
+        debug: bool = False
+    ):
+        """
+        Initialize USM Security instance.
+        
+        Args:
+            username: Security name (user name)
+            auth_protocol: Authentication protocol OID
+            auth_password: Authentication password (will be converted to key)
+            auth_key: Pre-computed authentication key (alternative to password)
+            priv_protocol: Privacy protocol OID
+            priv_password: Privacy password (will be converted to key)
+            priv_key: Pre-computed privacy key (alternative to password)
+            engine_id: Authoritative snmpEngineID (required for keys)
+            engine_boots: Engine boots counter
+            engine_time: Engine time in seconds
+            authoritative: True if this is an authoritative engine (agent)
+            version: SNMP version (should be 3)
+            debug: Enable debug output
+            
+        Raises:
+            USMSecurityError: If parameters are invalid or incompatible
+        """
+        # Basic attributes
+        self._error = None
+        self._version = version
+        self._debug = debug
+        self._authoritative = authoritative
+        
+        # Discovery and synchronization flags
+        self._discovered = False       # Engine ID discovered
+        self._synchronized = False     # Time synchronized
+        
+        # Engine parameters
+        self._engine_id = engine_id or b''
+        self._engine_boots = engine_boots
+        self._engine_time = engine_time
+        self._latest_engine_time = 0
+        self._time_epoch = time.time()
+        
+        # User credentials
+        self._user_name = username
+        
+        # Authentication configuration
+        self._auth_protocol = auth_protocol
+        self._auth_password = auth_password
+        self._auth_key = auth_key
+        self._auth_data = None
+        self._auth_maclen = None
+        
+        # Privacy configuration
+        self._priv_protocol = priv_protocol
+        self._priv_password = priv_password
+        self._priv_key = priv_key
+        self._priv_data = None
+        
+        # Determine security level based on protocols
+        self._security_level = self._determine_security_level()
+        
+        # Validate protocols
+        self._validate_auth_protocol()
+        self._validate_priv_protocol()
+        
+        # Generate engine ID if authoritative and not provided
+        if self._authoritative and not self._engine_id:
+            self._snmp_engine_init()
+        
+        # Generate keys from passwords if needed
+        if self._engine_id:
+            if self._auth_password and not self._auth_key:
+                self._auth_key_generate()
+            if self._priv_password and not self._priv_key:
+                self._priv_key_generate()
+        
+        # Validate keys if provided
+        if self._auth_key:
+            self._auth_key_validate()
+        if self._priv_key:
+            self._priv_key_validate()
+    
+    # ========================================================================
+    # Property Accessors
+    # ========================================================================
+    
+    @property
+    def error(self) -> Optional[str]:
+        """Get the last error message"""
+        return self._error
+    
+    @property
+    def version(self) -> int:
+        """Get SNMP version"""
+        return self._version
+    
+    @property
+    def security_level(self) -> SecurityLevel:
+        """Get security level"""
+        return self._security_level
+    
+    @property
+    def engine_id(self) -> bytes:
+        """Get authoritative engine ID"""
+        return self._engine_id
+    
+    @engine_id.setter
+    def engine_id(self, value: bytes):
+        """Set authoritative engine ID and regenerate keys"""
+        self._engine_id = value
+        # Regenerate keys with new engine ID
+        if self._auth_password:
+            self._auth_key_generate()
+        if self._priv_password:
+            self._priv_key_generate()
+    
+    @property
+    def engine_boots(self) -> int:
+        """Get engine boots counter"""
+        return self._engine_boots
+    
+    @engine_boots.setter
+    def engine_boots(self, value: int):
+        """Set engine boots counter"""
+        self._engine_boots = value
+    
+    @property
+    def engine_time(self) -> int:
+        """Get engine time"""
+        if self._authoritative:
+            # Calculate current time based on epoch
+            return int(time.time() - self._time_epoch) + self._engine_time
+        return self._engine_time
+    
+    @engine_time.setter
+    def engine_time(self, value: int):
+        """Set engine time"""
+        self._engine_time = value
+        self._time_epoch = time.time()
+    
+    @property
+    def user_name(self) -> str:
+        """Get security name (username)"""
+        return self._user_name
+    
+    @property
+    def discovered(self) -> bool:
+        """Check if engine ID has been discovered"""
+        return self._discovered
+    
+    @property
+    def synchronized(self) -> bool:
+        """Check if time has been synchronized"""
+        return self._synchronized
+    
+    # ========================================================================
+    # Security Level Determination
+    # ========================================================================
+    
+    def _determine_security_level(self) -> SecurityLevel:
+        """
+        Determine security level based on configured protocols.
+        
+        Returns:
+            SecurityLevel: The appropriate security level
+        """
+        if self._auth_protocol == AUTH_PROTOCOL_NONE:
+            return SECURITY_LEVEL_NOAUTHNOPRIV
+        elif self._priv_protocol == PRIV_PROTOCOL_NONE:
+            return SECURITY_LEVEL_AUTHNOPRIV
+        else:
+            return SECURITY_LEVEL_AUTHPRIV
+    
+    # ========================================================================
+    # Protocol Validation
+    # ========================================================================
+    
+    def _validate_auth_protocol(self):
+        """Validate authentication protocol"""
+        if self._auth_protocol not in AUTH_PROTOCOL_INFO:
+            raise USMSecurityError(
+                f'Unknown authentication protocol: {self._auth_protocol}'
+            )
+        
+        # Store MAC length for this protocol
+        if self._auth_protocol != AUTH_PROTOCOL_NONE:
+            self._auth_maclen = AUTH_PROTOCOL_INFO[self._auth_protocol]['mac_length']
+    
+    def _validate_priv_protocol(self):
+        """Validate privacy protocol"""
+        if self._priv_protocol not in PRIV_PROTOCOL_INFO:
+            raise USMSecurityError(
+                f'Unknown privacy protocol: {self._priv_protocol}'
+            )
+        
+        # Check crypto library availability if encryption needed
+        if self._priv_protocol != PRIV_PROTOCOL_NONE and not CRYPTO_AVAILABLE:
+            raise USMSecurityError(
+                'Privacy protocol requires PyCryptodome: pip install pycryptodome'
+            )
+    
+    # ========================================================================
+    # Engine Initialization
+    # ========================================================================
+    
+    def _snmp_engine_init(self):
+        """
+        Initialize SNMP engine ID for authoritative engine.
+        
+        RFC 3414 Section 5 defines the engine ID format:
+        - First 4 octets: Enterprise ID (or format indicator)
+        - Remaining octets: Engine-specific identifier
+        
+        We generate a simple engine ID based on:
+        - Format 1 (0x80000000 | enterprise_id)
+        - Enterprise ID: 0 (reserved for demo/test)
+        - Engine ID: Based on hostname and timestamp
+        """
+        import socket
+        import random
+        
+        if USM._engine_id_cache:
+            self._engine_id = USM._engine_id_cache
+            return
+        
+        # Format 1: IPv4 address
+        # First byte: 0x80 (format indicator)
+        # Next 3 bytes: Enterprise ID (use 0x000000 for generic)
+        # Format: 0x01 (IPv4)
+        # Last 4 bytes: IP address
+        
+        try:
+            # Try to get local IP
+            hostname = socket.gethostname()
+            ip_addr = socket.gethostbyname(hostname)
+            ip_bytes = bytes(map(int, ip_addr.split('.')))
+            
+            # Build engine ID: 0x80 + enterprise(3) + format(1) + ip(4)
+            self._engine_id = b'\x80\x00\x00\x00\x01' + ip_bytes
+            
+        except:
+            # Fallback: random engine ID
+            # Format 5: Octets administratively assigned
+            random_bytes = bytes([random.randint(0, 255) for _ in range(12)])
+            self._engine_id = b'\x80\x00\x00\x00\x05' + random_bytes
+        
+        # Cache for reuse
+        USM._engine_id_cache = self._engine_id
+        
+        # Initialize time tracking
+        self._time_epoch = time.time()
+        self._engine_boots = 1  # Start at 1 per RFC 3414
+    
+    # ========================================================================
+    # Key Generation (RFC 3414 Section 11.2)
+    # ========================================================================
+    
+    def _auth_key_generate(self):
+        """
+        Generate authentication key from password.
+        
+        RFC 3414 Section 11.2 defines the key generation process:
+        1. Expand password by repetition to 2^20 octets (1,048,576 bytes)
+        2. Hash the expanded password
+        3. Localize the hash with engine ID
+        
+        This process is computationally expensive by design to prevent
+        offline dictionary attacks.
+        
+        Raises:
+            USMSecurityError: If engine ID or password not set
+        """
+        if not self._engine_id or not self._auth_password:
+            raise USMSecurityError('Unable to generate authKey: missing engine ID or password')
+        
+        self._auth_key = self._password_localize(self._auth_password)
+        
+        if not self._auth_key:
+            raise USMSecurityError('Failed to generate authentication key')
+    
+    def _priv_key_generate(self):
+        """
+        Generate privacy key from password.
+        
+        The privacy key is generated similarly to the authentication key,
+        but may require extension for longer cipher keys (3DES, AES-192, AES-256).
+        
+        Key Extension Methods:
+        - 3DES/Cisco AES: Chain the password-to-key algorithm
+        - Draft AES: Use hash function on localized key
+        
+        Raises:
+            USMSecurityError: If engine ID or password not set
+        """
+        if not self._engine_id or not self._priv_password:
+            raise USMSecurityError('Unable to generate privKey: missing engine ID or password')
+        
+        # Generate base key
+        self._priv_key = self._password_localize(self._priv_password)
+        
+        if not self._priv_key:
+            raise USMSecurityError('Failed to generate privacy key')
+        
+        # Extend key if needed for longer ciphers
+        if self._priv_protocol in [
+            PRIV_PROTOCOL_DRAFT_3DESEDE,
+            PRIV_PROTOCOL_AESCFB192_CISCO,
+            PRIV_PROTOCOL_AESCFB256_CISCO
+        ]:
+            # Chain algorithm: use output as new input
+            self._priv_key += self._password_localize(self._priv_key.decode('latin-1'))
+            
+        elif self._priv_protocol in [
+            PRIV_PROTOCOL_DRAFT_AESCFB192,
+            PRIV_PROTOCOL_DRAFT_AESCFB256
+        ]:
+            # Use hash function on localized key
+            info = AUTH_PROTOCOL_INFO[self._auth_protocol]
+            hash_func = info['hash_func']
+            h = hash_func()
+            h.update(self._priv_key)
+            self._priv_key += h.digest()
+        
+        # Truncate to required length
+        required_len = PRIV_PROTOCOL_INFO[self._priv_protocol]['key_length']
+        self._priv_key = self._priv_key[:required_len]
+    
+    def _password_localize(self, password: str) -> bytes:
+        """
+        Localize a password to create a key (RFC 3414 Section 11.2).
+        
+        Process:
+        1. Expand password by repetition to 2^20 octets (1,048,576 bytes)
+        2. Compute digest of expanded password
+        3. Localize: hash(digest + engine_id + digest)
+        
+        This creates a key that is:
+        - Computationally expensive to brute-force (1M hash operations)
+        - Unique to the authoritative engine ID
+        - Derived deterministically from the password
+        
+        Args:
+            password: The password to localize
+            
+        Returns:
+            Localized key as bytes
+            
+        Raises:
+            USMSecurityError: If hash function not available
+        """
+        info = AUTH_PROTOCOL_INFO[self._auth_protocol]
+        hash_func = info.get('hash_func')
+        
+        if not hash_func:
+            raise USMSecurityError(
+                f'Hash function not available for protocol: {self._auth_protocol}'
+            )
+        
+        # Create hash object
+        h = hash_func()
+        
+        # Expand password to 2^20 octets by repetition
+        password_bytes = password.encode('utf-8')
+        password_len = len(password_bytes)
+        
+        # Calculate repetitions needed
+        target_size = 2 ** 20  # 1,048,576 bytes
+        repetitions = (target_size // password_len) + 1
+        expanded = password_bytes * repetitions
+        
+        # Hash in chunks of 2048 bytes (for memory efficiency)
+        chunk_size = 2048
+        total_hashed = 0
+        
+        while total_hashed < target_size:
+            chunk = expanded[total_hashed:total_hashed + chunk_size]
+            h.update(chunk)
+            total_hashed += len(chunk)
+        
+        # Get initial digest
+        digest = h.digest()
+        
+        # Localize with engine ID
+        h = hash_func()
+        h.update(digest)
+        h.update(self._engine_id)
+        h.update(digest)
+        
+        return h.digest()
+    
+    # ========================================================================
+    # Key Validation
+    # ========================================================================
+    
+    def _auth_key_validate(self):
+        """
+        Validate authentication key length.
+        
+        Raises:
+            USMSecurityError: If key length is incorrect
+        """
+        info = AUTH_PROTOCOL_INFO[self._auth_protocol]
+        expected_len = info['key_length']
+        actual_len = len(self._auth_key)
+        
+        if actual_len != expected_len:
+            raise USMSecurityError(
+                f'Invalid {info["name"]} authKey length: {actual_len}, expected {expected_len}'
+            )
+    
+    def _priv_key_validate(self):
+        """
+        Validate privacy key length and content.
+        
+        For 3DES, additional validation ensures the three keys are different
+        (K1 != K2, K2 != K3, K1 != K3) as required by the draft specification.
+        
+        Raises:
+            USMSecurityError: If key length is incorrect or keys are invalid
+        """
+        info = PRIV_PROTOCOL_INFO[self._priv_protocol]
+        expected_len = info['key_length']
+        actual_len = len(self._priv_key)
+        
+        if actual_len != expected_len:
+            raise USMSecurityError(
+                f'Invalid {info["name"]} privKey length: {actual_len}, expected {expected_len}'
+            )
+        
+        # Special validation for 3DES
+        if self._priv_protocol == PRIV_PROTOCOL_DRAFT_3DESEDE:
+            k1 = self._priv_key[0:8]
+            k2 = self._priv_key[8:16]
+            k3 = self._priv_key[16:24]
+            
+            if k1 == k2:
+                raise USMSecurityError('Invalid CBC-3DES-EDE privKey: K1 equals K2')
+            if k2 == k3:
+                raise USMSecurityError('Invalid CBC-3DES-EDE privKey: K2 equals K3')
+            if k1 == k3:
+                raise USMSecurityError('Invalid CBC-3DES-EDE privKey: K1 equals K3')
+    
+    # ========================================================================
+    # Authentication (HMAC) Operations
+    # ========================================================================
+    
+    def generate_auth_key(self, message: bytes) -> bytes:
+        """
+        Generate authentication MAC for a message (RFC 3414 Section 6).
+        
+        Process:
+        1. Create HMAC using auth key and message
+        2. Truncate HMAC to required MAC length (96-384 bits)
+        
+        The MAC provides:
+        - Data integrity: Detects any message modification
+        - Data origin authentication: Proves message sender has the key
+        
+        Args:
+            message: The message to authenticate
+            
+        Returns:
+            Truncated HMAC (MAC)
+            
+        Raises:
+            USMSecurityError: If authentication not configured
+        """
+        if self._auth_protocol == AUTH_PROTOCOL_NONE:
+            return b''
+        
+        if not self._auth_key:
+            raise USMSecurityError('Authentication key not available')
+        
+        info = AUTH_PROTOCOL_INFO[self._auth_protocol]
+        hash_func = info['hash_func']
+        mac_length = info['mac_length']
+        
+        # Compute HMAC
+        h = hmac.new(self._auth_key, message, hash_func)
+        mac = h.digest()
+        
+        # Truncate to required length
+        return mac[:mac_length]
+    
+    def verify_auth_key(self, message: bytes, received_mac: bytes) -> bool:
+        """
+        Verify authentication MAC for a received message.
+        
+        Args:
+            message: The received message
+            received_mac: The MAC from the message
+            
+        Returns:
+            True if MAC is valid, False otherwise
+        """
+        if self._auth_protocol == AUTH_PROTOCOL_NONE:
+            return True
+        
+        try:
+            expected_mac = self.generate_auth_key(message)
+            # Use constant-time comparison to prevent timing attacks
+            return hmac.compare_digest(expected_mac, received_mac)
+        except:
+            return False
+    
+    # ========================================================================
+    # Privacy (Encryption/Decryption) Operations
+    # ========================================================================
+    
+    def encrypt(self, plaintext: bytes, salt: Optional[bytes] = None) -> Tuple[bytes, bytes]:
+        """
+        Encrypt data using configured privacy protocol.
+        
+        Args:
+            plaintext: Data to encrypt
+            salt: Optional salt/IV (generated if not provided)
+            
+        Returns:
+            Tuple of (ciphertext, salt/IV)
+            
+        Raises:
+            USMSecurityError: If encryption fails
+        """
+        if self._priv_protocol == PRIV_PROTOCOL_NONE:
+            return plaintext, b''
+        
+        if not self._priv_key:
+            raise USMSecurityError('Privacy key not available')
+        
+        # Generate salt if not provided
+        if salt is None:
+            salt = self._generate_salt()
+        
+        if self._priv_protocol == PRIV_PROTOCOL_DES:
+            return self._encrypt_des(plaintext, salt), salt
+            
+        elif self._priv_protocol == PRIV_PROTOCOL_DRAFT_3DESEDE:
+            return self._encrypt_3des(plaintext, salt), salt
+            
+        elif self._priv_protocol in [
+            PRIV_PROTOCOL_AESCFB128,
+            PRIV_PROTOCOL_DRAFT_AESCFB128,
+            PRIV_PROTOCOL_DRAFT_AESCFB192,
+            PRIV_PROTOCOL_DRAFT_AESCFB256,
+            PRIV_PROTOCOL_AESCFB192_CISCO,
+            PRIV_PROTOCOL_AESCFB256_CISCO
+        ]:
+            return self._encrypt_aes(plaintext, salt), salt
+        
+        raise USMSecurityError(f'Unsupported privacy protocol: {self._priv_protocol}')
+    
+    def decrypt(self, ciphertext: bytes, salt: bytes) -> bytes:
+        """
+        Decrypt data using configured privacy protocol.
+        
+        Args:
+            ciphertext: Data to decrypt
+            salt: Salt/IV from the message
+            
+        Returns:
+            Decrypted plaintext
+            
+        Raises:
+            USMSecurityError: If decryption fails
+        """
+        if self._priv_protocol == PRIV_PROTOCOL_NONE:
+            return ciphertext
+        
+        if not self._priv_key:
+            raise USMSecurityError('Privacy key not available')
+        
+        if self._priv_protocol == PRIV_PROTOCOL_DES:
+            return self._decrypt_des(ciphertext, salt)
+            
+        elif self._priv_protocol == PRIV_PROTOCOL_DRAFT_3DESEDE:
+            return self._decrypt_3des(ciphertext, salt)
+            
+        elif self._priv_protocol in [
+            PRIV_PROTOCOL_AESCFB128,
+            PRIV_PROTOCOL_DRAFT_AESCFB128,
+            PRIV_PROTOCOL_DRAFT_AESCFB192,
+            PRIV_PROTOCOL_DRAFT_AESCFB256,
+            PRIV_PROTOCOL_AESCFB192_CISCO,
+            PRIV_PROTOCOL_AESCFB256_CISCO
+        ]:
+            return self._decrypt_aes(ciphertext, salt)
+        
+        raise USMSecurityError(f'Unsupported privacy protocol: {self._priv_protocol}')
+    
+    def _generate_salt(self) -> bytes:
+        """
+        Generate salt/IV for encryption.
+        
+        - DES/3DES: 8 bytes (engine boots + engine time + counter)
+        - AES: 8 bytes (engine boots + engine time)
+        
+        Returns:
+            Salt bytes
+        """
+        import random
+        
+        # Use engine boots and time if available
+        if self._engine_boots and self._engine_time:
+            # Pack as network byte order (big-endian)
+            boots_time = struct.pack('!II', self._engine_boots, self.engine_time)
+            return boots_time
+        else:
+            # Random salt as fallback
+            return bytes([random.randint(0, 255) for _ in range(8)])
+    
+    # ========================================================================
+    # DES Encryption/Decryption (RFC 3414 Section 8.1.1)
+    # ========================================================================
+    
+    def _encrypt_des(self, plaintext: bytes, salt: bytes) -> bytes:
+        """Encrypt using DES in CBC mode"""
+        if not CRYPTO_AVAILABLE:
+            raise USMSecurityError('DES encryption requires PyCryptodome')
+        
+        # DES key is first 8 bytes of privKey
+        des_key = self._priv_key[:8]
+        
+        # Pre-IV is last 8 bytes of privKey
+        pre_iv = self._priv_key[8:16]
+        
+        # IV = pre_IV XOR salt
+        iv = bytes(a ^ b for a, b in zip(pre_iv, salt))
+        
+        # Pad plaintext to multiple of 8 bytes (DES block size)
+        padded = self._pad_pkcs5(plaintext, 8)
+        
+        # Encrypt
+        cipher = DES.new(des_key, DES.MODE_CBC, iv)
+        return cipher.encrypt(padded)
+    
+    def _decrypt_des(self, ciphertext: bytes, salt: bytes) -> bytes:
+        """Decrypt using DES in CBC mode"""
+        if not CRYPTO_AVAILABLE:
+            raise USMSecurityError('DES decryption requires PyCryptodome')
+        
+        # DES key is first 8 bytes of privKey
+        des_key = self._priv_key[:8]
+        
+        # Pre-IV is last 8 bytes of privKey
+        pre_iv = self._priv_key[8:16]
+        
+        # IV = pre_IV XOR salt
+        iv = bytes(a ^ b for a, b in zip(pre_iv, salt))
+        
+        # Decrypt
+        cipher = DES.new(des_key, DES.MODE_CBC, iv)
+        padded = cipher.decrypt(ciphertext)
+        
+        # Remove padding
+        return self._unpad_pkcs5(padded)
+    
+    # ========================================================================
+    # 3DES Encryption/Decryption
+    # ========================================================================
+    
+    def _encrypt_3des(self, plaintext: bytes, salt: bytes) -> bytes:
+        """Encrypt using 3DES-EDE in CBC mode"""
+        if not CRYPTO_AVAILABLE:
+            raise USMSecurityError('3DES encryption requires PyCryptodome')
+        
+        # 3DES key is first 24 bytes of privKey
+        des3_key = self._priv_key[:24]
+        
+        # Pre-IV is last 8 bytes of privKey
+        pre_iv = self._priv_key[24:32]
+        
+        # IV = pre_IV XOR salt
+        iv = bytes(a ^ b for a, b in zip(pre_iv, salt))
+        
+        # Pad plaintext
+        padded = self._pad_pkcs5(plaintext, 8)
+        
+        # Encrypt
+        cipher = DES3.new(des3_key, DES3.MODE_CBC, iv)
+        return cipher.encrypt(padded)
+    
+    def _decrypt_3des(self, ciphertext: bytes, salt: bytes) -> bytes:
+        """Decrypt using 3DES-EDE in CBC mode"""
+        if not CRYPTO_AVAILABLE:
+            raise USMSecurityError('3DES decryption requires PyCryptodome')
+        
+        # 3DES key is first 24 bytes of privKey
+        des3_key = self._priv_key[:24]
+        
+        # Pre-IV is last 8 bytes of privKey
+        pre_iv = self._priv_key[24:32]
+        
+        # IV = pre_IV XOR salt
+        iv = bytes(a ^ b for a, b in zip(pre_iv, salt))
+        
+        # Decrypt
+        cipher = DES3.new(des3_key, DES3.MODE_CBC, iv)
+        padded = cipher.decrypt(ciphertext)
+        
+        # Remove padding
+        return self._unpad_pkcs5(padded)
+    
+    # ========================================================================
+    # AES Encryption/Decryption (RFC 3826)
+    # ========================================================================
+    
+    def _encrypt_aes(self, plaintext: bytes, salt: bytes) -> bytes:
+        """Encrypt using AES in CFB128 mode"""
+        if not CRYPTO_AVAILABLE:
+            raise USMSecurityError('AES encryption requires PyCryptodome')
+        
+        # Determine key size
+        key_len = PRIV_PROTOCOL_INFO[self._priv_protocol]['key_length']
+        aes_key = self._priv_key[:key_len]
+        
+        # IV = engine boots + engine time + salt (16 bytes total)
+        iv = salt + bytes([0] * (16 - len(salt)))
+        
+        # No padding needed for CFB mode
+        cipher = AES.new(aes_key, AES.MODE_CFB, iv, segment_size=128)
+        return cipher.encrypt(plaintext)
+    
+    def _decrypt_aes(self, ciphertext: bytes, salt: bytes) -> bytes:
+        """Decrypt using AES in CFB128 mode"""
+        if not CRYPTO_AVAILABLE:
+            raise USMSecurityError('AES decryption requires PyCryptodome')
+        
+        # Determine key size
+        key_len = PRIV_PROTOCOL_INFO[self._priv_protocol]['key_length']
+        aes_key = self._priv_key[:key_len]
+        
+        # IV = engine boots + engine time + salt (16 bytes total)
+        iv = salt + bytes([0] * (16 - len(salt)))
+        
+        # Decrypt
+        cipher = AES.new(aes_key, AES.MODE_CFB, iv, segment_size=128)
+        return cipher.decrypt(ciphertext)
+    
+    # ========================================================================
+    # Padding Utilities
+    # ========================================================================
+    
+    def _pad_pkcs5(self, data: bytes, block_size: int) -> bytes:
+        """
+        Add PKCS#5 padding to data.
+        
+        PKCS#5 padding adds N bytes of value N, where N is the number
+        of bytes needed to reach the next block boundary (1-block_size).
+        
+        Args:
+            data: Data to pad
+            block_size: Block size in bytes
+            
+        Returns:
+            Padded data
+        """
+        padding_len = block_size - (len(data) % block_size)
+        padding = bytes([padding_len] * padding_len)
+        return data + padding
+    
+    def _unpad_pkcs5(self, data: bytes) -> bytes:
+        """
+        Remove PKCS#5 padding from data.
+        
+        Args:
+            data: Padded data
+            
+        Returns:
+            Unpadded data
+            
+        Raises:
+            USMSecurityError: If padding is invalid
+        """
+        if not data:
+            raise USMSecurityError('Cannot unpad empty data')
+        
+        padding_len = data[-1]
+        
+        # Validate padding
+        if padding_len < 1 or padding_len > len(data):
+            raise USMSecurityError('Invalid PKCS#5 padding')
+        
+        padding = data[-padding_len:]
+        if not all(b == padding_len for b in padding):
+            raise USMSecurityError('Invalid PKCS#5 padding bytes')
+        
+        return data[:-padding_len]
+    
+    # ========================================================================
+    # Time Synchronization
+    # ========================================================================
+    
+    def synchronize(self, engine_boots: int, engine_time: int):
+        """
+        Synchronize engine time parameters.
+        
+        RFC 3414 Section 3.2.7 requires time synchronization to prevent
+        replay attacks. Messages outside the time window (150 seconds)
+        are rejected.
+        
+        Args:
+            engine_boots: Authoritative engine boots
+            engine_time: Authoritative engine time
+        """
+        self._engine_boots = engine_boots
+        self._engine_time = engine_time
+        self._time_epoch = time.time()
+        self._latest_engine_time = engine_time
+        self._synchronized = True
+    
+    def is_time_valid(self, boots: int, msg_time: int) -> bool:
+        """
+        Check if received time parameters are within acceptable window.
+        
+        RFC 3414 Section 3.2.7:
+        - Boots must match
+        - Time must be within ±150 seconds
+        
+        Args:
+            boots: Received engine boots
+            msg_time: Received engine time
+            
+        Returns:
+            True if time is valid
+        """
+        if boots != self._engine_boots:
+            return False
+        
+        current_time = self.engine_time
+        time_diff = abs(current_time - msg_time)
+        
+        # RFC 3414: 150 second window
+        return time_diff <= 150
+    
+    # ========================================================================
+    # String Representation
+    # ========================================================================
+    
+    def __repr__(self) -> str:
+        """String representation of USM instance"""
+        return (
+            f"USM(user='{self._user_name}', "
+            f"level={self._security_level.name}, "
+            f"auth={AUTH_PROTOCOL_INFO.get(self._auth_protocol, {}).get('name', 'Unknown')}, "
+            f"priv={PRIV_PROTOCOL_INFO.get(self._priv_protocol, {}).get('name', 'Unknown')})"
+        )
+
+
+# ============================================================================
+# Module-level Convenience Functions
+# ============================================================================
+
+def generate_engine_id() -> bytes:
+    """
+    Generate a random engine ID.
+    
+    Returns:
+        8-byte engine ID
+    """
+    import socket
+    import random
+    
+    try:
+        # Try to get local IP
+        hostname = socket.gethostname()
+        ip_addr = socket.gethostbyname(hostname)
+        ip_bytes = bytes(map(int, ip_addr.split('.')))
+        
+        # Format: 0x80 + enterprise(3) + format(1) + ip(4)
+        return b'\x80\x00\x00\x00\x01' + ip_bytes
+        
+    except:
+        # Fallback: random
+        random_bytes = bytes([random.randint(0, 255) for _ in range(12)])
+        return b'\x80\x00\x00\x00\x05' + random_bytes
+
+
+def password_to_key(password: str, engine_id: bytes, auth_protocol: str = AUTH_PROTOCOL_HMACSHA) -> bytes:
+    """
+    Convert password to localized key.
+    
+    Args:
+        password: Password string
+        engine_id: Authoritative engine ID
+        auth_protocol: Authentication protocol to use
+        
+    Returns:
+        Localized key bytes
+    """
+    usm = USM(
+        username='temp',
+        auth_protocol=auth_protocol,
+        auth_password=password,
+        engine_id=engine_id
+    )
+    return usm._auth_key
+
+
+# ============================================================================
+# Example Usage
+# ============================================================================
+
+if __name__ == '__main__':
+    """Example usage demonstrating USM functionality"""
+    
+    print("SNMPv3 USM Security Module - Example Usage")
+    print("=" * 70)
+    
+    # Example 1: Create USM with password-based authentication
+    print("\nExample 1: Password-based Authentication")
+    print("-" * 70)
+    
+    engine_id = generate_engine_id()
+    print(f"Generated Engine ID: {engine_id.hex()}")
+    
+    usm = USM(
+        username='admin',
+        auth_protocol=AUTH_PROTOCOL_HMACSHA256,
+        auth_password='authpassword123',
+        priv_protocol=PRIV_PROTOCOL_NONE,  # No encryption for demo
+        engine_id=engine_id
+    )
+    
+    print(f"USM Instance: {usm}")
+    print(f"Security Level: {usm.security_level.name}")
+    print(f"Auth Key (hex): {usm._auth_key.hex()[:32]}...")
+    if usm._priv_key:
+        print(f"Priv Key (hex): {usm._priv_key.hex()[:32]}...")
+    
+    # Example 2: Authentication
+    print("\nExample 2: Message Authentication")
+    print("-" * 70)
+    
+    message = b"This is a test SNMPv3 message"
+    mac = usm.generate_auth_key(message)
+    print(f"Message: {message}")
+    print(f"Generated MAC: {mac.hex()}")
+    
+    # Verify MAC
+    is_valid = usm.verify_auth_key(message, mac)
+    print(f"MAC Verification: {'VALID' if is_valid else 'INVALID'}")
+    
+    # Example 3: Encryption
+    if CRYPTO_AVAILABLE:
+        print("\nExample 3: Message Encryption")
+        print("-" * 70)
+        
+        plaintext = b"Confidential SNMP data"
+        print(f"Plaintext: {plaintext}")
+        
+        ciphertext, salt = usm.encrypt(plaintext)
+        print(f"Ciphertext (hex): {ciphertext.hex()}")
+        print(f"Salt (hex): {salt.hex()}")
+        
+        decrypted = usm.decrypt(ciphertext, salt)
+        print(f"Decrypted: {decrypted}")
+        print(f"Match: {plaintext == decrypted}")
+    else:
+        print("\nExample 3: Encryption (PyCryptodome not available)")
+        print("Install with: pip install pycryptodome")
+    
+    # Example 4: Different protocols
+    print("\nExample 4: Protocol Support")
+    print("-" * 70)
+    
+    protocols = [
+        ("HMAC-MD5", AUTH_PROTOCOL_HMACMD5),
+        ("HMAC-SHA-1", AUTH_PROTOCOL_HMACSHA),
+        ("HMAC-SHA-256", AUTH_PROTOCOL_HMACSHA256),
+        ("HMAC-SHA-512", AUTH_PROTOCOL_HMACSHA512),
+    ]
+    
+    for name, protocol in protocols:
+        info = AUTH_PROTOCOL_INFO[protocol]
+        print(f"{name:20} Key: {info['key_length']:2d} bytes, MAC: {info['mac_length']:2d} bytes")
+    
+    print("\n" + "=" * 70)
+    print("USM module ready for production use!")

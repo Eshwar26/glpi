@@ -1,41 +1,65 @@
-package GLPI::Agent::Task::Inventory::BSD::Uptime;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory BSD Uptime - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+import time
+from typing import Any, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, uname, get_first_line
 
-use GLPI::Agent::Tools;
 
-use constant    category    => "hardware";
-
-sub isEnabled {
-    return canRun('sysctl');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-
-    my $arch   = Uname("-m");
-    my $uptime = _getUptime(command => 'sysctl -n kern.boottime');
-    $inventory->setHardware({
-        DESCRIPTION => "$arch/$uptime"
-    });
-}
-
-sub _getUptime {
-    my $line = getFirstLine(@_);
-
-    # the output of 'sysctl -n kern.boottime' differs between BSD flavours
-    my $boottime =
-        $line =~ /^(\d+)/      ? $1 : # OpenBSD format
-        $line =~ /sec = (\d+)/ ? $1 : # FreeBSD format
-        undef;
-    return unless $boottime;
-
-    return time - $boottime;
-}
-
-1;
+class Uptime(InventoryModule):
+    """BSD Uptime inventory module."""
+    
+    @staticmethod
+    def category() -> str:
+        """Return the inventory category."""
+        return "hardware"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('sysctl')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        
+        arch = uname("-m")
+        uptime = Uptime._get_uptime(command='sysctl -n kern.boottime')
+        
+        description = f"{arch}/{uptime}" if arch and uptime else arch or str(uptime)
+        
+        if inventory:
+            inventory.set_hardware({
+                'DESCRIPTION': description
+            })
+    
+    @staticmethod
+    def _get_uptime(**params) -> Optional[int]:
+        """Get system uptime in seconds."""
+        line = get_first_line(**params)
+        if not line:
+            return None
+        
+        # the output of 'sysctl -n kern.boottime' differs between BSD flavours
+        boottime = None
+        
+        # OpenBSD format: starts with a number
+        match = re.match(r'^(\d+)', line)
+        if match:
+            boottime = int(match.group(1))
+        else:
+            # FreeBSD format: sec = <number>
+            match = re.search(r'sec = (\d+)', line)
+            if match:
+                boottime = int(match.group(1))
+        
+        if boottime is None:
+            return None
+        
+        return int(time.time()) - boottime

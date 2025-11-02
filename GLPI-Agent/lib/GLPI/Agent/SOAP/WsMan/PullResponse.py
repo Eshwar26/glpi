@@ -1,23 +1,20 @@
-package GLPI::Agent::SOAP::WsMan::PullResponse;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.enumerate_response import EnumerateResponse
 
-use strict;
-use warnings;
+class PullResponse(EnumerateResponse):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::PullResponse
+    WSMan PullResponse node handling.
+    """
+    
+    @staticmethod
+    def support():
+        return {
+            'EnumerationContext': "n:EnumerationContext",
+            'Items': "n:Items",
+            'EndOfSequence': "n:EndOfSequence",
+        }
 
-use GLPI::Agent::SOAP::WsMan::EnumerateResponse;
 
-## no critic (ProhibitMultiplePackages)
-package
-    PullResponse;
-
-use parent
-    'EnumerateResponse';
-
-sub support {
-    return {
-        EnumerationContext  => "n:EnumerationContext",
-        Items               => "n:Items",
-        EndOfSequence       => "n:EndOfSequence",
-    };
-}
-
-1;
+# Note: The package structure is handled by module imports.
+# This class inherits from EnumerateResponse instead of Node.

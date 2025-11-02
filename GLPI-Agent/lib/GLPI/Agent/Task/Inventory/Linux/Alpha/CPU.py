@@ -1,56 +1,53 @@
-package GLPI::Agent::Task::Inventory::Linux::Alpha::CPU;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Linux Alpha CPU - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, List, Dict
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_read
+from GLPI.Agent.Tools.Linux import get_cpus_from_proc
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Linux;
 
-use constant    category    => "cpu";
-
-sub isEnabled {
-    return canRead('/proc/cpuinfo');
-};
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    foreach my $cpu (_getCPUsFromProc(
-        logger => $logger, file => '/proc/cpuinfo')
-    ) {
-        $inventory->addEntry(
-            section => 'CPUS',
-            entry   => $cpu
-        );
-    }
-}
-
-sub _getCPUsFromProc {
-    my @cpus;
-    foreach my $cpu (getCPUsFromProc(@_)) {
-
-        my $speed;
-        if (
-            $cpu->{'cycle frequency [hz]'} &&
-            $cpu->{'cycle frequency [hz]'} =~ /(\d+)000000/
-        ) {
-            $speed = $1;
-        }
-
-        push @cpus, {
-            ARCH   => 'alpha',
-            NAME   => $cpu->{processor},
-            SERIAL => $cpu->{'cpu serial number'},
-            SPEED  => $speed
-        };
-    }
-
-    return @cpus;
-}
-
-1;
+class CPU(InventoryModule):
+    """Alpha CPU detection module."""
+    
+    category = "cpu"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_read('/proc/cpuinfo')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        for cpu in CPU._get_cpus_from_proc(logger=logger, file='/proc/cpuinfo'):
+            if inventory:
+                inventory.add_entry(section='CPUS', entry=cpu)
+    
+    @staticmethod
+    def _get_cpus_from_proc(**params) -> List[Dict[str, Any]]:
+        """Parse Alpha CPU information from /proc/cpuinfo."""
+        cpus = []
+        for cpu in get_cpus_from_proc(**params):
+            speed = None
+            cycle_freq = cpu.get('cycle frequency [hz]', '')
+            if cycle_freq:
+                match = re.search(r'(\d+)000000', cycle_freq)
+                if match:
+                    speed = int(match.group(1))
+            
+            cpus.append({
+                'ARCH': 'alpha',
+                'NAME': cpu.get('processor'),
+                'SERIAL': cpu.get('cpu serial number'),
+                'SPEED': speed
+            })
+        
+        return cpus

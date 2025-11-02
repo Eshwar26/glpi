@@ -1,48 +1,52 @@
-package GLPI::Agent::SOAP::WsMan::CommandState;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
+class CommandState(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::CommandState
+    WSMan CommandState node handling.
+    """
+    xmlns = 'rsp'
+    
+    @staticmethod
+    def support():
+        return {
+            'ExitCode': "rsp:ExitCode",
+        }
+    
+    def done(self, cid=None):
+        """
+        Check if the command state is done.
+        
+        Args:
+            cid: Optional CommandId to verify against
+            
+        Returns:
+            bool: True if state is done (and CommandId matches if provided), False otherwise
+        """
+        if cid:
+            thiscid = self.attribute("CommandId")
+            if not thiscid or thiscid != cid:
+                return False
+        
+        done_url = "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done"
+        state = self.attribute("State")
+        
+        return bool(state and state == done_url)
+    
+    def exitcode(self):
+        """
+        Get the exit code as a string.
+        
+        Returns:
+            str or None: The exit code string, or None if not found
+        """
+        exitcode = self.get('ExitCode')
+        if not exitcode:
+            return None
+        
+        return exitcode.string()
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    CommandState;
-
-use parent
-    'Node';
-
-use GLPI::Agent::Tools;
-
-use constant    xmlns   => 'rsp';
-
-sub support {
-    return {
-        ExitCode    => "rsp:ExitCode",
-    };
-}
-
-sub done {
-    my ($self, $cid) = @_;
-
-    if ($cid) {
-        my $thiscid = $self->attribute("CommandId");
-        return 0 unless $thiscid && $thiscid eq $cid;
-    }
-
-    my $done_url = "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done";
-    my $state = $self->attribute("State");
-
-    return $state && $state eq $done_url ? 1 : 0 ;
-}
-
-sub exitcode {
-    my ($self) = @_;
-
-    my $exitcode = $self->get('ExitCode')
-        or return;
-
-    return $exitcode->string();
-}
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.

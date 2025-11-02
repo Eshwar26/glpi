@@ -1,175 +1,174 @@
-package GLPI::Agent::Task::Inventory::Generic::Dmidecode::Memory;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Generic Dmidecode Memory - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, Dict, List, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import get_canonical_speed, get_canonical_size, trim_whitespace, get_sanitized_string, hex2char
+from GLPI.Agent.Tools.Generic import get_dmidecode_infos
+from GLPI.Agent.Tools.PartNumber import PartNumber
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Generic;
-use GLPI::Agent::Tools::PartNumber;
 
-use constant    category    => "memory";
-
-# Run after virtualization to decide if found component is virtual
-our $runAfterIfEnabled = [ qw(
-    GLPI::Agent::Task::Inventory::Vmsystem
-    GLPI::Agent::Task::Inventory::Win32::Hardware
-    GLPI::Agent::Task::Inventory::Linux::Memory
-    GLPI::Agent::Task::Inventory::BSD::Memory
-)];
-
-sub isEnabled {
-    return 1;
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $memories = _getMemories(logger => $logger);
-
-    return unless $memories;
-
-    # If only one component is defined and we are under a vmsystem, we can update
-    # component capacity to real found size. This permits to support memory size updates.
-    my $vmsystem = $inventory->getHardware('VMSYSTEM');
-    if ($vmsystem && $vmsystem !~ /^(Physical|VMware)$/) {
-        my @components = grep { exists $_->{CAPACITY} } @$memories;
-        if ( @components == 1) {
-            my $real_memory = $inventory->getHardware('MEMORY');
-            my $component = shift @components;
-            if (!$real_memory) {
-                $logger->debug2("Can't verify real memory capacity on this virtual machine");
-            } elsif (!$component->{CAPACITY} || $component->{CAPACITY} != $real_memory) {
-                $logger->debug2($component->{CAPACITY} ?
-                    "Updating virtual component memory capacity to found real capacity: $component->{CAPACITY} => $real_memory"
-                    : "Setting virtual component memory capacity to $real_memory"
-                );
-                $component->{CAPACITY} = $real_memory;
+class Memory(InventoryModule):
+    """Dmidecode memory inventory module."""
+    
+    # Run after virtualization to decide if found component is virtual
+    run_after_if_enabled = [
+        'GLPI.Agent.Task.Inventory.Vmsystem',
+        'GLPI.Agent.Task.Inventory.Win32.Hardware',
+        'GLPI.Agent.Task.Inventory.Linux.Memory',
+        'GLPI.Agent.Task.Inventory.BSD.Memory',
+    ]
+    
+    @staticmethod
+    def category() -> str:
+        """Return the inventory category."""
+        return "memory"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return True
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        memories = Memory._get_memories(logger=logger)
+        
+        if not memories:
+            return
+        
+        # If only one component is defined and we are under a vmsystem, we can update
+        # component capacity to real found size. This permits to support memory size updates.
+        vmsystem = inventory.get_hardware('VMSYSTEM')
+        if vmsystem and not re.match(r'^(Physical|VMware)$', vmsystem):
+            components = [m for m in memories if 'CAPACITY' in m]
+            if len(components) == 1:
+                real_memory = inventory.get_hardware('MEMORY')
+                component = components[0]
+                if not real_memory:
+                    if logger:
+                        logger.debug2("Can't verify real memory capacity on this virtual machine")
+                elif not component.get('CAPACITY') or component['CAPACITY'] != real_memory:
+                    if logger:
+                        if component.get('CAPACITY'):
+                            logger.debug2(
+                                f"Updating virtual component memory capacity to found real capacity: "
+                                f"{component['CAPACITY']} => {real_memory}"
+                            )
+                        else:
+                            logger.debug2(f"Setting virtual component memory capacity to {real_memory}")
+                    component['CAPACITY'] = real_memory
+        
+        for memory in memories:
+            if inventory:
+                inventory.add_entry(
+                    section='MEMORIES',
+                    entry=memory
+                )
+    
+    @staticmethod
+    def _get_memories(**params) -> Optional[List[Dict[str, Any]]]:
+        """Get memory modules from dmidecode."""
+        infos = get_dmidecode_infos(**params)
+        
+        memories = []
+        slot = 0
+        defaults = {}
+        
+        bios_infos = infos.get(0, [{}])[0]
+        bios_vendor = bios_infos.get('Vendor', '')
+        bios_version = bios_infos.get('Version', '')
+        
+        if re.match(r'^Microsoft', bios_vendor, re.IGNORECASE) and re.match(r'^Hyper-V', bios_version, re.IGNORECASE):
+            defaults = {
+                'Description': 'Hyper-V Memory',
+                'Manufacturer': bios_vendor,
             }
-        }
-    }
-
-    foreach my $memory (@$memories) {
-        $inventory->addEntry(
-            section => 'MEMORIES',
-            entry   => $memory
-        );
-    }
-}
-
-sub _getMemories {
-    my $infos = getDmidecodeInfos(@_);
-
-    my ($memories, $slot, %defaults);
-
-    my $bios_infos   = $infos->{0}->[0];
-    my $bios_vendor  = $bios_infos->{Vendor} // "";
-    my $bios_version = $bios_infos->{Version}      // "";
-
-    if ($bios_vendor =~ /^Microsoft/i && $bios_version =~ /^Hyper-V/i) {
-        %defaults = (
-            Description  => "Hyper-V Memory",
-            Manufacturer => $bios_vendor,
-        );
-    }
-
-    if ($infos->{17}) {
-
-        foreach my $info (@{$infos->{17}}) {
-            $slot++;
-
-            # Flash is 'in general' an unrelated internal BIOS storage
-            # See bug: #1334
-            next if $info->{'Type'} && $info->{'Type'} =~ /Flash/i;
-
-            my $manufacturer;
-            if (
-                $info->{'Manufacturer'}
-                    &&
-                ( $info->{'Manufacturer'} !~ /
-                  Manufacturer
-                      |
-                  Undefined
-                      |
-                  None
-                      |
-                  ^0x
-                      |
-                  \d{4}
-                      |
-                  \sDIMM
-                  /ix )
-            ) {
-                $manufacturer = $info->{'Manufacturer'};
-            }
-
-            my $memory = {
-                NUMSLOTS         => $slot,
-                DESCRIPTION      => $info->{'Form Factor'} // $defaults{Description},
-                CAPTION          => $info->{'Locator'},
-                SPEED            => getCanonicalSpeed($info->{'Speed'}),
-                TYPE             => $info->{'Type'},
-                SERIALNUMBER     => $info->{'Serial Number'},
-                MEMORYCORRECTION => $infos->{16}[0]{'Error Correction Type'},
-                MANUFACTURER     => $manufacturer // $defaults{Manufacturer}
-            };
-
-            if ($info->{'Size'} && $info->{'Size'} =~ /^(\d+ \s .B)$/x) {
-                $memory->{CAPACITY} = getCanonicalSize($1, 1024);
-            }
-
-            if ($info->{'Part Number'}
-                    &&
-                $info->{'Part Number'} !~ /
-                    DIMM            |
-                    Part\s*Num      |
-                    Ser\s*Num
-                /xi
-            ) {
-                $memory->{MODEL} = trimWhitespace(
-                    getSanitizedString( hex2char($info->{'Part Number'}) )
-                );
-                $memory->{MODEL} =~ s/-+$//;
-                my $partnumber_factory = GLPI::Agent::Tools::PartNumber->new(@_);
-                my $partnumber = $partnumber_factory->match(
-                    partnumber  => $memory->{MODEL},
-                    category    => "memory",
-                    mm_id       => $info->{'Module Manufacturer ID'} // '',
-                );
-                if ($partnumber) {
-                    $memory->{MANUFACTURER} = $partnumber->manufacturer;
-                    $memory->{SPEED} = $partnumber->speed
-                        if !$memory->{SPEED} && $partnumber->speed;
-                    $memory->{TYPE} = $partnumber->type
-                        if !$memory->{TYPE} && $partnumber->type;
+        
+        if infos.get(17):
+            for info in infos[17]:
+                slot += 1
+                
+                # Flash is 'in general' an unrelated internal BIOS storage
+                # See bug: #1334
+                if info.get('Type') and re.match(r'Flash', info['Type'], re.IGNORECASE):
+                    continue
+                
+                manufacturer = None
+                if info.get('Manufacturer'):
+                    # Check if manufacturer is not a placeholder value
+                    if not re.search(
+                        r'Manufacturer|Undefined|None|^0x|\d{4}|\sDIMM',
+                        info['Manufacturer'],
+                        re.IGNORECASE | re.VERBOSE
+                    ):
+                        manufacturer = info['Manufacturer']
+                
+                memory = {
+                    'NUMSLOTS': slot,
+                    'DESCRIPTION': info.get('Form Factor') or defaults.get('Description'),
+                    'CAPTION': info.get('Locator'),
+                    'SPEED': get_canonical_speed(info.get('Speed')),
+                    'TYPE': info.get('Type'),
+                    'SERIALNUMBER': info.get('Serial Number'),
+                    'MEMORYCORRECTION': infos.get(16, [{}])[0].get('Error Correction Type'),
+                    'MANUFACTURER': manufacturer or defaults.get('Manufacturer')
                 }
-            }
-
-            push @$memories, $memory;
-        }
-    } elsif ($infos->{6}) {
-
-        foreach my $info (@{$infos->{6}}) {
-            $slot++;
-
-            my $memory = {
-                NUMSLOTS => $slot,
-                TYPE     => $info->{'Type'},
-            };
-
-            if ($info->{'Installed Size'} && $info->{'Installed Size'} =~ /^(\d+\s*.B)/i) {
-                $memory->{CAPACITY} = getCanonicalSize($1, 1024);
-            }
-
-            push @$memories, $memory;
-        }
-    }
-
-    return $memories;
-}
-
-1;
+                
+                if info.get('Size'):
+                    match = re.match(r'^(\d+\s*.B)$', info['Size'], re.VERBOSE)
+                    if match:
+                        memory['CAPACITY'] = get_canonical_size(match.group(1), 1024)
+                
+                if info.get('Part Number'):
+                    # Check if part number is not a placeholder
+                    if not re.search(
+                        r'DIMM|Part\s*Num|Ser\s*Num',
+                        info['Part Number'],
+                        re.IGNORECASE | re.VERBOSE
+                    ):
+                        model = trim_whitespace(
+                            get_sanitized_string(hex2char(info['Part Number']))
+                        )
+                        model = re.sub(r'-+$', '', model)
+                        memory['MODEL'] = model
+                        
+                        partnumber_factory = PartNumber(**params)
+                        partnumber = partnumber_factory.match(
+                            partnumber=memory['MODEL'],
+                            category='memory',
+                            mm_id=info.get('Module Manufacturer ID', '')
+                        )
+                        if partnumber:
+                            memory['MANUFACTURER'] = partnumber.manufacturer()
+                            if not memory.get('SPEED') and partnumber.speed():
+                                memory['SPEED'] = partnumber.speed()
+                            if not memory.get('TYPE') and partnumber.type():
+                                memory['TYPE'] = partnumber.type()
+                
+                memories.append(memory)
+                
+        elif infos.get(6):
+            for info in infos[6]:
+                slot += 1
+                
+                memory = {
+                    'NUMSLOTS': slot,
+                    'TYPE': info.get('Type'),
+                }
+                
+                if info.get('Installed Size'):
+                    match = re.match(r'^(\d+\s*.B)', info['Installed Size'], re.IGNORECASE)
+                    if match:
+                        memory['CAPACITY'] = get_canonical_size(match.group(1), 1024)
+                
+                memories.append(memory)
+        
+        return memories if memories else None

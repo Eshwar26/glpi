@@ -1,17 +1,24 @@
-package GLPI::Agent::Task::Inventory::Linux::AntiVirus;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Linux AntiVirus - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
 
-use constant    category    => "antivirus";
 
-sub isEnabled {
-    return 1;
-}
-
-sub doInventory {
-}
-
-1;
+class AntiVirus(InventoryModule):
+    """Base Linux antivirus detection module."""
+    
+    category = "antivirus"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return True
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection - placeholder."""
+        pass

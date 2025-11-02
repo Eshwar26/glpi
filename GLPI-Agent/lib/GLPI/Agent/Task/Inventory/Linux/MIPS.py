@@ -1,22 +1,26 @@
-package GLPI::Agent::Task::Inventory::Linux::MIPS;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Linux MIPS - Python Implementation
+"""
 
-use strict;
-use warnings;
+import platform
+from typing import Any
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import Uname
 
-use Config;
 
-use GLPI::Agent::Tools;
-
-sub isEnabled {
-    my (%params) = @_;
-
-    return Uname("-m") =~ /^mips/ if $params{remote};
-    return $Config{archname} =~ /^mips/;
-}
-
-sub doInventory {
-}
-
-1;
+class MIPS(InventoryModule):
+    """MIPS architecture detection module."""
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        if params.get('remote'):
+            return Uname('-m').startswith('mips')
+        return platform.machine().startswith('mips')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        pass

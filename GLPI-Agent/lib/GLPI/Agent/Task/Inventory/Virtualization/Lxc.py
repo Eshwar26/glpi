@@ -1,234 +1,214 @@
-package GLPI::Agent::Task::Inventory::Virtualization::Lxc;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Virtualization LXC - Python Implementation
+"""
 
-# Authors: Egor Shornikov <se@wbr.su>, Egor Morozov <akrus@flygroup.st>
-# License: GPLv2+
+from typing import Any, Dict, List, Optional
 
-use strict;
-use warnings;
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import (can_run, get_all_lines, get_first_line,
+                              get_first_match, can_read)
+from GLPI.Agent.Tools.Linux import get_cpus_from_proc
+from GLPI.Agent.Tools.Network import mac_address_pattern
+from GLPI.Agent.Tools import get_canonical_size
+from GLPI.Agent.Tools.Virtualization import (
+    STATUS_RUNNING, STATUS_PAUSED, STATUS_OFF,
+    get_virtual_uuid,
+)
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Linux;
-use GLPI::Agent::Tools::Network;
-use GLPI::Agent::Tools::Virtualization;
+class Lxc(InventoryModule):
+    """LXC containers detection module (also supports Proxmox pct)."""
 
-sub isEnabled {
-    return canRun('lxc-ls') || canRun('pct');
-}
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        return can_run('lxc-ls') or can_run('pct')
 
-sub doInventory {
-    my (%params) = @_;
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        inventory = params.get('inventory')
+        logger = params.get('logger')
 
-    my $inventory = $params{inventory};
+        for machine in Lxc._get_virtual_machines(
+            runpct=can_run('pct'), logger=logger
+        ):
+            if inventory:
+                inventory.add_entry(section='VIRTUALMACHINES', entry=machine)
 
-    # Check if we require to list containers using proxmox pct command
-    my @machines = _getVirtualMachines(
-        runpct => canRun('pct'),
-        logger => $params{logger}
-    );
+    @staticmethod
+    def _get_virtual_machine_state(**params) -> str:
+        lines = get_all_lines(**params) or []
+        state = STATUS_OFF
+        for line in lines:
+            if line.lower().startswith('state:'):
+                value = line.split(':', 1)[1].strip().upper()
+                state = (
+                    STATUS_RUNNING if value == 'RUNNING' else
+                    STATUS_PAUSED if value == 'FROZEN' else
+                    STATUS_OFF
+                )
+                break
+        return state
 
-    foreach my $machine (@machines) {
-        $inventory->addEntry(
-            section => 'VIRTUALMACHINES', entry => $machine
-        );
-    }
-}
+    @staticmethod
+    def _get_virtual_machine(**params) -> Optional[Dict[str, Any]]:
+        name = params['name']
+        ctid = params.get('ctid', name)
+        lxcpath = params['lxcpath']
+        logger = params.get('logger')
+        version = float(params.get('version') or 0)
 
-sub  _getVirtualMachineState {
-    my (%params) = @_;
-
-    my @lines = getAllLines(%params)
-        or return;
-
-    my $state = STATUS_OFF;
-    foreach my $line (@lines) {
-        if ($line =~ m/^State:\s*(\S+)$/i) {
-            $state = $1 eq 'RUNNING' ? STATUS_RUNNING :
-                     $1 eq 'FROZEN'  ? STATUS_PAUSED  :
-                     STATUS_OFF;
-            last;
+        container: Dict[str, Any] = {
+            'NAME': name,
+            'VMTYPE': 'lxc',
+            'VCPU': 0,
+            'STATUS': Lxc._get_virtual_machine_state(
+                command=params.get('test_cmdstate') or f"lxc-info -n '{ctid}' -s",
+                logger=logger,
+            ),
         }
-    }
 
-    return $state;
-}
+        proxmox = True if ctid.isdigit() else False
 
-sub  _getVirtualMachine {
-    my (%params) = @_;
-
-    my $name   = $params{name};
-    my $ctid   = $params{ctid} // $name;
-    my $config = "$params{lxcpath}/$ctid/config";
-    my $container = {
-        NAME    => $name,
-        VMTYPE  => 'lxc',
-        VCPU    => 0,
-        STATUS  => _getVirtualMachineState(
-            command => $params{test_cmdstate} || "lxc-info -n '$ctid' -s",
-            logger => $params{logger}
+        command = (
+            f"lxc-info -n '{ctid}' -c lxc.cgroup.memory.limit_in_bytes "
+            f"-c lxc.cgroup2.memory.max -c lxc.cgroup.cpuset.cpus -c lxc.cgroup2.cpuset.cpus"
         )
-    };
+        if version < 2.1:
+            command += f"; grep lxc.network.hwaddr {lxcpath}/{ctid}/config"
+            if proxmox:
+                command += f"; grep utsname {lxcpath}/{ctid}/config"
+        else:
+            command += " -c lxc.net.0.hwaddr"
+            if proxmox:
+                command += " -c lxc.uts.name"
 
-    # Proxmox environment sets name as number and it should have been passed as ctid
-    my $proxmox = $ctid =~ /^\d+$/ ? 1 : 0;
+        lines = get_all_lines(command=params.get('test_cmdinfo') or command, logger=logger)
+        if not lines:
+            return None
 
-    my $command = "lxc-info -n '$ctid' -c lxc.cgroup.memory.limit_in_bytes -c lxc.cgroup2.memory.max -c lxc.cgroup.cpuset.cpus -c lxc.cgroup2.cpuset.cpus";
-    if ($params{version} < 2.1) {
-        # Before 2.1, we need to find MAC as lxc.network.hwaddr in config
-        $command .= "; grep lxc.network.hwaddr $config";
-        # Look for lxc.utsname from config file in Proxmox environment
-        $command .= "; grep utsname $config" if $proxmox;
-    } else {
-        $command .= " -c lxc.net.0.hwaddr";
-        # Look for lxc.uts.name in Proxmox environment
-        $command .= " -c lxc.uts.name" if $proxmox;
-    }
+        import re
+        for line in lines:
+            if line.startswith('#'):
+                continue
+            m = re.match(r"^\s*(\S+)\s*=\s*(\S+)\s*$", line)
+            if not m:
+                continue
+            key, val = m.group(1), m.group(2)
 
-    my @lines = getAllLines(
-        command => $params{test_cmdinfo} || $command,
-        logger  => $params{logger}
-    );
-    return unless @lines;
+            if key in ('lxc.network.hwaddr', 'lxc.net.0.hwaddr'):
+                if re.match(mac_address_pattern, val, re.IGNORECASE):
+                    container['MAC'] = val.lower()
 
-    foreach my $line (@lines) {
-        next if $line =~ /^#.*/;
-        next unless $line =~ m/^\s*(\S+)\s*=\s*(\S+)\s*$/;
+            if key in ('lxc.cgroup.memory.limit_in_bytes', 'lxc.cgroup2.memory.max'):
+                # Append unit for canonical size conversion
+                if re.search(r"[KMGTP]$", val, re.IGNORECASE):
+                    val += 'b'
+                elif re.match(r"^\d+$", val):
+                    val += 'bytes'
+                container['MEMORY'] = get_canonical_size(val, 1024)
 
-        my $key = $1;
-        my $val = $2;
-        if ($key eq 'lxc.network.hwaddr' || $key eq 'lxc.net.0.hwaddr') {
-            $container->{MAC} = lc($val)
-                if $val =~ $mac_address_pattern;
-        }
+            if proxmox and key in ('lxc.uts.name', 'lxc.utsname'):
+                container['NAME'] = val
 
-        if ($key eq 'lxc.cgroup.memory.limit_in_bytes' || $key eq 'lxc.cgroup2.memory.max') {
-            $val .= $val =~ /[KMGTP]$/i ? "b" : $val =~ /^\d+$/ ? "bytes" : "";
-            $container->{MEMORY} = getCanonicalSize($val, 1024);
-        }
+            if key in ('lxc.cgroup.cpuset.cpus', 'lxc.cgroup2.cpuset.cpus'):
+                vcpu = 0
+                for token in val.split(','):
+                    token = token.strip()
+                    r = re.match(r"(\d+)-(\d+)", token)
+                    if r:
+                        vcpu += int(r.group(2)) - int(r.group(1)) + 1
+                    elif token:
+                        vcpu += 1
+                container['VCPU'] = vcpu
 
-        # Update container name in Proxmox environment
-        if ($proxmox && ($key eq 'lxc.uts.name' || $key eq 'lxc.utsname')) {
-            $container->{NAME} = $val;
-        }
+        return container
 
-        if ($key eq 'lxc.cgroup.cpuset.cpus' || $key eq 'lxc.cgroup2.cpuset.cpus') {
-            ###eg: lxc.cgroup.cpuset.cpus = 0,3-5,7,2,1
-            $container->{VCPU} = 0;
-            foreach my $cpu ( split( /,/, $val ) ){
-                if ( $cpu =~ /(\d+)-(\d+)/ ){
-                    $container->{VCPU} += $2 - $1 + 1;
-                } else {
-                    $container->{VCPU} += 1;
-                }
-            }
-        }
-    }
+    @staticmethod
+    def _get_virtual_machines(**params) -> List[Dict[str, Any]]:
+        logger = params.get('logger')
+        runpct = params.get('runpct', False)
 
-    return $container;
-}
+        lines = get_all_lines(command='pct list' if runpct else 'lxc-ls -1', logger=logger)
+        if not lines:
+            return []
 
-sub  _getVirtualMachines {
-    my (%params) = @_;
+        version = get_first_match(command='lxc-ls --version', pattern=r'^(\d+\.\d+)', logger=logger)
+        try:
+            version_num = float(version) if version else 0.0
+        except ValueError:
+            version_num = 0.0
 
-    my @lines = getAllLines(
-        command => $params{runpct} ? 'pct list' : 'lxc-ls -1',
-        %params
-    );
-    return unless @lines;
+        lxcpath = get_first_line(command='lxc-config lxc.lxcpath', logger=logger) or '/var/lib/lxc'
 
-    my $version = getFirstMatch(
-        command => "lxc-ls --version",
-        pattern => qr/^(\d+\.\d+)/,
-        %params
-    );
+        rootfs_conf = 'lxc.rootfs' if version_num < 2.1 else 'lxc.rootfs.path'
+        max_cpus = 0
+        pct_name_offset = 0
 
-    my $lxcpath = getFirstLine(
-        command => "lxc-config lxc.lxcpath",
-        %params
-    ) || "/var/lib/lxc";
+        machines: List[Dict[str, Any]] = []
 
-    my $rootfs_conf = $version < 2.1 ? "lxc.rootfs" : "lxc.rootfs.path";
-    my $max_cpus = 0;
-    my $pct_name_offset = 0;
+        for name in lines:
+            vmid = None
+            if runpct:
+                import re
+                m = re.match(r'^(VMID\s.*\s)Name.*$', name)
+                if m:
+                    pct_name_offset = len(m.group(1))
+                    continue
+                elif pct_name_offset:
+                    m2 = re.match(r'^(\d+)', name)
+                    if m2:
+                        vmid = m2.group(1)
+                    name = name[pct_name_offset:]
+                else:
+                    continue
 
-    my @machines;
+            name = name.rstrip()
+            if not name:
+                continue
 
-    foreach my $name (@lines) {
-        my $vmid;
-        # Support pct when running with proxmox
-        if ($params{runpct}) {
-            if ($name =~ /^(VMID\s.*\s)Name.*$/) {
-                $pct_name_offset = length($1);
-                next;
-            } elsif ($pct_name_offset) {
-                $vmid = $1 if $name =~ m/^(\d+)/;
-                $name = substr($name, $pct_name_offset);
-            } else {
-                next;
-            }
-        }
+            ctid = vmid if (runpct and vmid) else name
+            container = Lxc._get_virtual_machine(
+                name=name, ctid=ctid, version=version_num, lxcpath=lxcpath, logger=logger
+            )
+            if not container:
+                continue
 
-        # lxc-ls -1 shows one entry by line
-        $name =~ s/\s+$//;         # trim trailing whitespace
-        next unless length($name); # skip if empty as name can contain space
+            if not container.get('VCPU'):
+                if not max_cpus:
+                    cpus = get_cpus_from_proc(logger=logger)
+                    max_cpus = len(cpus) if isinstance(cpus, list) else 0
+                container['VCPU'] = max_cpus
 
-        # Handle proxmox case using vmid as container name in commands
-        my $ctid = $params{runpct} && $vmid ? $vmid : $name;
+            machineid = None
+            hostname = None
+            if container.get('STATUS') == STATUS_RUNNING:
+                machineid = get_first_line(
+                    command=f"lxc-attach -n '{ctid}' -- /bin/cat /etc/machine-id",
+                    logger=logger,
+                )
+                hostname = get_first_line(
+                    command=f"lxc-attach -n '{ctid}' -- /bin/cat /etc/hostname",
+                    logger=logger,
+                )
+            else:
+                rootfs = get_first_match(
+                    command=f"/usr/bin/lxc-info -n '{ctid}' -c {rootfs_conf}",
+                    pattern=r'^lxc\.rootfs.*\s*=\s*(.*)$',
+                    logger=logger,
+                )
+                if rootfs:
+                    if ':' in rootfs:
+                        rootfs = rootfs.split(':', 1)[1]
+                    if can_read(f"{rootfs}/etc/machine-id") and can_read(f"{rootfs}/etc/hostname"):
+                        machineid = get_first_line(file=f"{rootfs}/etc/machine-id", logger=logger)
+                        hostname = get_first_line(file=f"{rootfs}/etc/hostname", logger=logger)
 
-        my $container = _getVirtualMachine(
-            name    => $name,
-            ctid    => $ctid,
-            version => $version,
-            lxcpath => $lxcpath,
-            logger  => $params{logger}
-        );
+            uuid = get_virtual_uuid(machineid, hostname)
+            if uuid:
+                container['UUID'] = uuid
 
-        # Set VCPU to max host cpus count if not set in conf
-        if (!$container->{VCPU}) {
-            $max_cpus = getCPUsFromProc(logger => $params{logger})
-                unless $max_cpus;
-            $container->{VCPU} = $max_cpus;
-        }
+            machines.append(container)
 
-        my ($machineid, $hostname);
-        if ( $container->{STATUS} && $container->{STATUS} eq STATUS_RUNNING ) {
-            $machineid = getFirstLine(
-                command => "lxc-attach -n '$ctid' -- /bin/cat /etc/machine-id",
-                logger => $params{logger}
-            );
-            $hostname = getFirstLine(
-                command => "lxc-attach -n '$ctid' -- /bin/cat /etc/hostname",
-                logger => $params{logger}
-            );
-        } else {
-            # Try to directly access container filesystem for not powered container
-            # Works for standard fs or overlay rootfs
-            my $rootfs = getFirstMatch(
-                command => "/usr/bin/lxc-info -n '$ctid' -c $rootfs_conf",
-                pattern => qr/^lxc\.rootfs.*\s*=\s*(.*)$/,
-                logger  => $params{logger}
-            );
-            $rootfs =~ s/.*:// if $rootfs =~ /:/;
-            if (canRead("$rootfs/etc/machine-id") && canRead("$rootfs/etc/hostname")) {
-                $machineid = getFirstLine(
-                    file   => "$rootfs/etc/machine-id",
-                    logger => $params{logger}
-                );
-                $hostname = getFirstLine(
-                    file   => "$rootfs/etc/hostname",
-                    logger => $params{logger}
-                );
-            }
-        }
+        return machines
 
-        my $uuid = getVirtualUUID($machineid, $hostname);
-        $container->{UUID} = $uuid if $uuid;
-
-        push @machines, $container;
-    }
-
-    return @machines;
-}
-
-1;

@@ -1,39 +1,29 @@
-package GLPI::Agent::SOAP::WsMan::SequenceId;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
+# from glpi.agent.soap.wsman.attribute import Attribute
 
-use strict;
-use warnings;
+class SequenceId(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::SequenceId
+    WSMan SequenceId node handling.
+    """
+    xmlns = 'p'
 
-use GLPI::Agent::SOAP::WsMan::Node;
+    def __init__(self):
+        """
+        Initialize a SequenceId node with must_understand('false') and index = 1.
+        """
+        # Call the parent (Node) constructor just like Perl's SUPER::new(...)
+        super().__init__(Attribute.must_understand("false"), 1)
 
-## no critic (ProhibitMultiplePackages)
-package
-    SequenceId;
+        # Perl: $self->{_index} = 1;
+        self._index = 1
 
-use parent
-    'Node';
+    def index(self):
+        """
+        Get the current index value.
 
-use constant    xmlns   => 'p';
-
-use GLPI::Agent::SOAP::WsMan::Attribute;
-
-sub new {
-    my ($class) = @_;
-
-    my $self = $class->SUPER::new(
-        Attribute->must_understand("false"),
-        1,
-    );
-
-    $self->{_index} = 1;
-
-    bless $self, $class;
-    return $self;
-}
-
-sub index {
-    my ($self) = @_;
-
-    return $self->{_index};
-}
-
-1;
+        Returns:
+            int: The internal index value.
+        """
+        return self._index

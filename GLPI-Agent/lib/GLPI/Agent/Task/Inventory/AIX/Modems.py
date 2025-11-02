@@ -1,48 +1,56 @@
-package GLPI::Agent::Task::Inventory::AIX::Modems;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory AIX Modems - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Dict, Any, List
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run
+from GLPI.Agent.Tools.AIX import get_adapters_from_lsdev
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::AIX;
 
-use constant    category    => "modem";
-
-sub isEnabled {
-    return canRun('lsdev');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    foreach my $modem (_getModems(
-        logger  => $logger,
-    )) {
-        $inventory->addEntry(
-            section => 'MODEMS',
-            entry   => $modem,
-        );
-    }
-}
-
-sub _getModems {
-    my @adapters = getAdaptersFromLsdev(@_);
-
-    my @modems;
-    foreach my $adapter (@adapters) {
-        next unless $adapter->{DESCRIPTION} =~ /modem/i;
-        push @modems, {
-            NAME        => $adapter->{NAME},
-            DESCRIPTION => $adapter->{DESCRIPTION},
-        };
-    }
-
-    return @modems;
-}
-
-1;
+class Modems(InventoryModule):
+    """AIX Modems inventory module."""
+    
+    @staticmethod
+    def category() -> str:
+        """Return the inventory category."""
+        return "modem"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('lsdev')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        modems = Modems._get_modems(logger=logger)
+        
+        for modem in modems:
+            if inventory:
+                inventory.add_entry(
+                    section='MODEMS',
+                    entry=modem
+                )
+    
+    @staticmethod
+    def _get_modems(**params) -> List[Dict[str, Any]]:
+        """Get modems information."""
+        adapters = get_adapters_from_lsdev(**params)
+        
+        modems = []
+        for adapter in adapters:
+            description = adapter.get('DESCRIPTION', '')
+            if re.search(r'modem', description, re.IGNORECASE):
+                modems.append({
+                    'NAME': adapter.get('NAME'),
+                    'DESCRIPTION': description,
+                })
+        
+        return modems

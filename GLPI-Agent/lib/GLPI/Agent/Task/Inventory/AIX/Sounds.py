@@ -1,49 +1,56 @@
-package GLPI::Agent::Task::Inventory::AIX::Sounds;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory AIX Sounds - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Dict, Any, List
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run
+from GLPI.Agent.Tools.AIX import get_adapters_from_lsdev
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::AIX;
 
-use constant    category    => "sound";
-
-sub isEnabled {
-    return canRun('lsdev');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    foreach my $sound (_getSounds(
-        logger  => $logger
-    )) {
-        $inventory->addEntry(
-            section => 'SOUNDS',
-            entry   => $sound
-        );
-    }
-
-}
-
-sub _getSounds {
-    my @adapters = getAdaptersFromLsdev(@_);
-
-    my @sounds;
-    foreach my $adapter (@adapters) {
-        next unless $adapter->{DESCRIPTION} =~ /audio/i;
-        push @sounds, {
-            NAME        => $adapter->{NAME},
-            DESCRIPTION => $adapter->{DESCRIPTION}
-        };
-    }
-
-    return @sounds;
-}
-
-1;
+class Sounds(InventoryModule):
+    """AIX Sounds inventory module."""
+    
+    @staticmethod
+    def category() -> str:
+        """Return the inventory category."""
+        return "sound"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('lsdev')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        sounds = Sounds._get_sounds(logger=logger)
+        
+        for sound in sounds:
+            if inventory:
+                inventory.add_entry(
+                    section='SOUNDS',
+                    entry=sound
+                )
+    
+    @staticmethod
+    def _get_sounds(**params) -> List[Dict[str, Any]]:
+        """Get sound devices information."""
+        adapters = get_adapters_from_lsdev(**params)
+        
+        sounds = []
+        for adapter in adapters:
+            description = adapter.get('DESCRIPTION', '')
+            if re.search(r'audio', description, re.IGNORECASE):
+                sounds.append({
+                    'NAME': adapter.get('NAME'),
+                    'DESCRIPTION': description
+                })
+        
+        return sounds

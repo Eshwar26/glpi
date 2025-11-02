@@ -1,17 +1,13 @@
-package GLPI::Agent::SOAP::WsMan::Text;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
+class Text(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::Text
+    WSMan Text node handling.
+    """
+    xmlns = 's'
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    Text;
-
-use parent
-    'Node';
-
-use constant    xmlns   => 's';
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.

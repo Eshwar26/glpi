@@ -1,62 +1,74 @@
-package GLPI::Agent::Task::Inventory::AIX::Drives;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory AIX Drives - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Dict, Any, List, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_all_lines
+from GLPI.Agent.Tools.Unix import get_filesystems_from_df
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Unix;
 
-use constant    category    => "drive";
-
-sub isEnabled {
-    return canRun('df');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    # get filesystems
-    my @filesystems =
-        getFilesystemsFromDf(logger => $logger, command => 'df -P -k');
-
-    my $types = _getFilesystemTypes(
-        command => 'lsfs -c',
-        logger  => $logger
-    );
-
-    # add filesystems to the inventory
-    foreach my $filesystem (@filesystems) {
-        $filesystem->{FILESYSTEM} = $types->{$filesystem->{TYPE}};
-
-        $inventory->addEntry(
-            section => 'DRIVES',
-            entry   => $filesystem
-        );
-    }
-}
-
-sub _getFilesystemTypes {
-    my (%params) = @_;
-
-    my @lines = getAllLines(%params)
-        or return;
-
-    my $types;
-
-    # skip headers
-    shift @lines;
-
-    foreach my $line (@lines) {
-        my ($mountpoint, undef, $type) =  split(/:/, $line);
-        $types->{$mountpoint} = $type;
-    }
-
-    return $types;
-}
-
-1;
+class Drives(InventoryModule):
+    """AIX Drives inventory module."""
+    
+    @staticmethod
+    def category() -> str:
+        """Return the inventory category."""
+        return "drive"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('df')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        # get filesystems
+        filesystems = get_filesystems_from_df(
+            logger=logger,
+            command='df -P -k'
+        )
+        
+        types = Drives._get_filesystem_types(
+            command='lsfs -c',
+            logger=logger
+        )
+        
+        # add filesystems to the inventory
+        for filesystem in filesystems:
+            if types and filesystem.get('TYPE'):
+                filesystem['FILESYSTEM'] = types.get(filesystem['TYPE'])
+            
+            if inventory:
+                inventory.add_entry(
+                    section='DRIVES',
+                    entry=filesystem
+                )
+    
+    @staticmethod
+    def _get_filesystem_types(**params) -> Optional[Dict[str, str]]:
+        """Get filesystem types."""
+        lines = get_all_lines(**params)
+        if not lines:
+            return None
+        
+        types = {}
+        
+        # skip headers
+        if lines:
+            lines = lines[1:]
+        
+        for line in lines:
+            parts = line.split(':')
+            if len(parts) >= 3:
+                mountpoint = parts[0]
+                fs_type = parts[2]
+                types[mountpoint] = fs_type
+        
+        return types

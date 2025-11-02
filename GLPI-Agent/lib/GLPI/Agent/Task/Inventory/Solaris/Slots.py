@@ -1,37 +1,43 @@
-package GLPI::Agent::Task::Inventory::Solaris::Slots;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Solaris Slots - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run
+from GLPI.Agent.Tools.Solaris import get_prtdiag_infos
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Solaris;
 
-use constant    category    => "slot";
-
-sub isEnabled {
-    return canRun('prtdiag');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    foreach my $slot (_getSlots(logger => $logger)) {
-        $inventory->addEntry(
-            section => 'SLOTS',
-            entry   => $slot
-        );
-    }
-}
-
-sub _getSlots {
-    my $info = getPrtdiagInfos(@_);
-
-    return $info->{slots} ? @{$info->{slots}} : ();
-}
-
-1;
+class Slots(InventoryModule):
+    """Solaris slots detection module."""
+    
+    category = "slot"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('prtdiag')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        for slot in Slots._get_slots(logger=logger):
+            if inventory:
+                inventory.add_entry(
+                    section='SLOTS',
+                    entry=slot
+                )
+    
+    @staticmethod
+    def _get_slots(**params):
+        """Get slots from prtdiag."""
+        info = get_prtdiag_infos(**params)
+        
+        if info and info.get('slots'):
+            return info['slots']
+        return []

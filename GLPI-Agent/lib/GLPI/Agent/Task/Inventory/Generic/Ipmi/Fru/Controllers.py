@@ -1,50 +1,59 @@
-package GLPI::Agent::Task::Inventory::Generic::Ipmi::Fru::Controllers;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Generic Ipmi Fru Controllers - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools.IpmiFru import get_ipmi_fru, parse_fru
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::IpmiFru;
 
-use constant    category    => "controller";
-
-my $CONTROLLERS = qr/^(?:
-    BP               |
-    PERC             |
-    NDC              |
-    Ethernet\s+Adptr |
-    SAS\s+Ctlr
-)\d*\s+/x;
-
-sub isEnabled {
-    return 1;
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-
-    my $fru = getIpmiFru(%params)
-        or return;
-
-    my @fru_keys = grep { $_ =~ $CONTROLLERS } keys %$fru
-        or return;
-
-    my $fields = $inventory->getFields()->{CONTROLLERS};
-    for my $descr (@fru_keys) {
-        my $ctrl = parseFru($fru->{$descr}, $fields);
-        next unless keys %$ctrl;
-
-        $ctrl->{TYPE} = $1 if $descr =~ /^([\w\s]+[[:alpha:]])/;
-
-        $inventory->addEntry(
-            section => 'CONTROLLERS',
-            entry   => $ctrl
-        );
-    }
-}
-
-1;
+class Controllers(InventoryModule):
+    """IPMI FRU controllers inventory module."""
+    
+    CONTROLLERS = re.compile(
+        r'^(?:BP|PERC|NDC|Ethernet\s+Adptr|SAS\s+Ctlr)\d*\s+',
+        re.VERBOSE
+    )
+    
+    @staticmethod
+    def category() -> str:
+        """Return the inventory category."""
+        return "controller"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return True
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        
+        fru = get_ipmi_fru(**params)
+        if not fru:
+            return
+        
+        fru_keys = [key for key in fru.keys() if Controllers.CONTROLLERS.match(key)]
+        if not fru_keys:
+            return
+        
+        fields = inventory.get_fields().get('CONTROLLERS')
+        for descr in fru_keys:
+            ctrl = parse_fru(fru[descr], fields)
+            if not ctrl:
+                continue
+            
+            # Extract type from description
+            match = re.match(r'^([\w\s]+[a-zA-Z])', descr)
+            if match:
+                ctrl['TYPE'] = match.group(1)
+            
+            if inventory:
+                inventory.add_entry(
+                    section='CONTROLLERS',
+                    entry=ctrl
+                )

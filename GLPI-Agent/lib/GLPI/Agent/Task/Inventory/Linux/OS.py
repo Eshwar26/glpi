@@ -1,93 +1,95 @@
-package GLPI::Agent::Task::Inventory::Linux::OS;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Linux OS - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, Uname, get_first_line, get_first_match, has_file, get_formated_local_time
+from GLPI.Agent.Tools.Unix import get_root_fs_birth
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Unix;
 
-use constant    category    => "os";
-
-sub isEnabled {
-    return 1;
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $kernelRelease = Uname("-r");
-
-    my $hostid = getFirstLine(
-        logger  => $logger,
-        command => 'hostid'
-    );
-
-    my $os = {
-        HOSTID         => $hostid,
-        KERNEL_VERSION => $kernelRelease,
-    };
-
-    my $installdate = _getOperatingSystemInstallDate(logger => $logger);
-    $os->{INSTALL_DATE} = $installdate
-        if $installdate;
-
-    $inventory->setOperatingSystem($os);
-}
-
-sub _getOperatingSystemInstallDate {
-    my (%params) = @_;
-
-    # Check for basesystem package installation date on rpm base systems
-    if (canRun('rpm')) {
-        my $time = _rpmBasesystemInstallDate(%params);
-        return $time if $time;
-    }
-
-    # Check for dpkg based systems (debian, ubuntu) as base-files.list is generated
-    # when base-files package is installed
-    return _debianInstallDate()
-        if has_file("/var/lib/dpkg/info/base-files.list");
-
-    # Otherwise read birth date of root file system
-    return getRootFSBirth(%params);
-}
-
-sub _rpmBasesystemInstallDate {
-    my (%params) = (
-        command => 'rpm -q --queryformat \'%{INSTALLTIME}\n\' basesystem',
-        @_
-    );
-
-    my $date = getFirstLine(%params);
-
-    my $installdate;
-    if (DateTime->require()) {
-        eval {
-            my $dt = DateTime->from_epoch( epoch => $date );
-            $installdate = $dt->datetime(' ');
+class OS(InventoryModule):
+    """Linux OS information detection module."""
+    
+    category = "os"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return True
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        kernel_release = Uname('-r')
+        
+        hostid = get_first_line(
+            logger=logger,
+            command='hostid'
+        )
+        
+        os = {
+            'HOSTID': hostid,
+            'KERNEL_VERSION': kernel_release,
         }
-    } else {
-        $installdate = getFormatedLocalTime($date);
-    }
-
-    return $installdate;
-}
-
-sub _debianInstallDate {
-    my (%params) = (
-        command => 'stat -c %w /var/lib/dpkg/info/base-files.list',
-        @_
-    );
-
-    return getFirstMatch(
-        pattern => qr{^(\d+-\d+-\d+\s\d+:\d+:\d+)},
-        %params
-    );
-}
-
-1;
+        
+        installdate = OS._get_operating_system_install_date(logger=logger)
+        if installdate:
+            os['INSTALL_DATE'] = installdate
+        
+        if inventory:
+            inventory.set_operating_system(os)
+    
+    @staticmethod
+    def _get_operating_system_install_date(**params) -> Optional[str]:
+        """Get operating system installation date."""
+        # Check for basesystem package installation date on rpm base systems
+        if can_run('rpm'):
+            time = OS._rpm_basesystem_install_date(**params)
+            if time:
+                return time
+        
+        # Check for dpkg based systems (debian, ubuntu)
+        if has_file('/var/lib/dpkg/info/base-files.list'):
+            return OS._debian_install_date()
+        
+        # Otherwise read birth date of root file system
+        return get_root_fs_birth(**params)
+    
+    @staticmethod
+    def _rpm_basesystem_install_date(**params) -> Optional[str]:
+        """Get basesystem package install date from RPM."""
+        if 'command' not in params:
+            params['command'] = "rpm -q --queryformat '%{INSTALLTIME}\\n' basesystem"
+        
+        date_str = get_first_line(**params)
+        if not date_str:
+            return None
+        
+        try:
+            # Try to use DateTime if available
+            import datetime
+            dt = datetime.datetime.fromtimestamp(int(date_str))
+            return dt.strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            # Fall back to getFormatedLocalTime
+            try:
+                return get_formated_local_time(int(date_str))
+            except Exception:
+                return None
+    
+    @staticmethod
+    def _debian_install_date(**params) -> Optional[str]:
+        """Get install date from Debian base-files."""
+        if 'command' not in params:
+            params['command'] = 'stat -c %w /var/lib/dpkg/info/base-files.list'
+        
+        return get_first_match(
+            pattern=r'^(\d+-\d+-\d+\s\d+:\d+:\d+)',
+            **params
+        )

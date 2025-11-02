@@ -1,123 +1,76 @@
-package GLPI::Agent::Task::Inventory::Virtualization::XenCitrixServer;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Virtualization Xen Citrix Server - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, Dict, List, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_all_lines
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Virtualization;
 
-our $runMeIfTheseChecksFailed = ["GLPI::Agent::Task::Inventory::Virtualization::Libvirt"];
+class XenCitrixServer(InventoryModule):
+    runMeIfTheseChecksFailed = ['GLPI::Agent::Task::Inventory::Virtualization::Libvirt']
 
-sub isEnabled {
-    return canRun('xe');
-}
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        return can_run('xe')
 
-sub doInventory {
-    my (%params) = @_;
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        inventory = params.get('inventory')
+        logger = params.get('logger')
 
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
+        machines = XenCitrixServer._get_virtual_machines(command='xe vm-list', logger=logger)
+        for machine in machines:
+            extended = XenCitrixServer._get_virtual_machine(
+                command=f"xe vm-param-list uuid={machine['UUID']}", logger=logger
+            )
+            if not extended:
+                continue
+            machine.update(extended)
+            if inventory:
+                inventory.add_entry(section='VIRTUALMACHINES', entry=machine)
 
-    my @machines = _getVirtualMachines(
-        command => 'xe vm-list',
-        logger  => $logger
-    );
+    @staticmethod
+    def _get_virtual_machines(**params) -> List[Dict[str, Any]]:
+        lines = get_all_lines(**params) or []
+        machines: List[Dict[str, Any]] = []
+        for line in lines:
+            m = re.search(r'uuid *\( *RO\) *: *([-0-9a-f]+) *$', line)
+            if not m:
+                continue
+            uuid = m.group(1)
+            machines.append({'UUID': uuid, 'SUBSYSTEM': 'xe', 'VMTYPE': 'xen'})
+        return machines
 
-    foreach my $machine (@machines) {
+    @staticmethod
+    def _get_virtual_machine(**params) -> Optional[Dict[str, Any]]:
+        lines = get_all_lines(**params) or []
+        if not lines:
+            return None
+        machine: Dict[str, Any] = {}
+        for line in lines:
+            m = re.match(r'^\s*(\S+)\s*\(...\)\s*:\s*(.*)$', line)
+            if not m:
+                continue
+            label, value = m.groups()
+            if label == 'dom-id' and value.isdigit() and int(value) == 0:
+                return None
+            if label == 'name-label':
+                machine['NAME'] = value
+            elif label == 'memory-actual':
+                try:
+                    machine['MEMORY'] = int(int(value) / 1048576)
+                except Exception:
+                    pass
+            elif label == 'power-state':
+                machine['STATUS'] = 'running' if value == 'running' else ('shutdown' if value == 'halted' else 'off')
+            elif label == 'VCPUs-number':
+                machine['VCPU'] = value
+            elif label == 'name-description':
+                if value:
+                    machine['COMMENT'] = value
+        return machine if machine else None
 
-        my $machineextend = _getVirtualMachine(
-            command => "xe vm-param-list uuid=".$machine->{UUID},
-            logger  => $logger,
-        );
-
-        # Skip the machine if Dom0
-        next unless $machineextend;
-
-        foreach my $key (keys(%{$machineextend})) {
-            $machine->{$key} = $machineextend->{$key};
-        }
-
-        $inventory->addEntry(
-            section => 'VIRTUALMACHINES', entry => $machine
-        );
-    }
-}
-
-sub _getVirtualMachines {
-    my (%params) = @_;
-
-    my @lines = getAllLines(%params)
-        or return;
-
-    my @machines;
-    foreach my $line (@lines) {
-
-        my ($uuid) = $line =~ /uuid *\( *RO\) *: *([-0-9a-f]+) *$/;
-        next unless $uuid;
-
-        my $machine = {
-            UUID      => $uuid,
-            SUBSYSTEM => 'xe',
-            VMTYPE    => 'xen',
-        };
-
-        push @machines, $machine;
-
-    }
-
-    return @machines;
-}
-
-sub  _getVirtualMachine {
-    my (%params) = @_;
-
-    my @lines = getAllLines(%params)
-        or return;
-
-    my $machine;
-
-    foreach my $line (@lines) {
-
-        # Lines format: extended-label (...): value(s)
-        my ($extendedlabel, $value) =
-            $line =~ /^\s*(\S+)\s*\(...\)\s*:\s*(.*)$/ ;
-
-        next unless $extendedlabel;
-
-        # dom-id 0 is not a VM
-        if ($extendedlabel =~ /dom-id/ && !int($value)) {
-            undef $machine;
-            last;
-        }
-        if ($extendedlabel =~ /name-label/) {
-            $machine->{NAME} = $value;
-            next;
-        }
-        if ($extendedlabel =~ /memory-actual/) {
-            $machine->{MEMORY} = ($value / 1048576);
-            next;
-        }
-        if ($extendedlabel =~ /power-state/) {
-            $machine->{STATUS} =
-                $value eq 'running' ? 'running'  :
-                $value eq 'halted'  ? 'shutdown' :
-                'off';
-            next;
-        }
-        if ($extendedlabel =~ /VCPUs-number/) {
-            $machine->{VCPU} = $value;
-            next;
-        }
-        if ($extendedlabel =~ /name-description/) {
-            next if $value eq '';
-            $machine->{COMMENT} = $value;
-            next;
-        }
-    }
-
-    return $machine;
-}
-
-1;

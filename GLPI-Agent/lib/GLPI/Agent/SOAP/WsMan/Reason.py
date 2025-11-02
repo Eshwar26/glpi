@@ -1,31 +1,33 @@
-package GLPI::Agent::SOAP::WsMan::Reason;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
+class Reason(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::Reason
+    WSMan Reason node handling.
+    """
+    xmlns = 's'
+    
+    @staticmethod
+    def support():
+        return {
+            'Text': "s:Text",
+        }
+    
+    def text(self):
+        """
+        Get the text content from the Reason node.
+        
+        Returns:
+            str: The text string, or empty string if not found
+        """
+        text_node = self.get('Text')
+        
+        if text_node:
+            return text_node.string()
+        
+        return ''
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    Reason;
-
-use parent
-    'Node';
-
-use constant    xmlns   => 's';
-
-sub support {
-    return {
-        Text    => "s:Text",
-    };
-}
-
-sub text {
-    my ($self) = @_;
-
-    my ($text) = $self->get('Text');
-
-    return $text->string // '';
-}
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.

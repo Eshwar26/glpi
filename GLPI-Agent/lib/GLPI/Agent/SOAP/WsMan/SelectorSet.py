@@ -1,25 +1,22 @@
-package GLPI::Agent::SOAP::WsMan::SelectorSet;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
+# from glpi.agent.soap.wsman.selector import Selector
 
-use strict;
-use warnings;
+class SelectorSet(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::SelectorSet
+    WSMan SelectorSet node handling.
+    """
+    xmlns = 'w'
 
-use GLPI::Agent::SOAP::WsMan::Node;
+    @classmethod
+    def support(cls):
+        """
+        Returns supported WSMan SelectorSet mappings.
 
-## no critic (ProhibitMultiplePackages)
-package
-    SelectorSet;
-
-use parent
-    'Node';
-
-use GLPI::Agent::SOAP::WsMan::Selector;
-
-use constant    xmlns   => 'w';
-
-sub support {
-    return {
-        Selector    => "w:Selector",
-    };
-}
-
-1;
+        Returns:
+            dict: Mapping of supported selector elements.
+        """
+        return {
+            'Selector': 'w:Selector',
+        }

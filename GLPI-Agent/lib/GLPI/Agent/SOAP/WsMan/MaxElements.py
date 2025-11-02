@@ -1,31 +1,39 @@
-package GLPI::Agent::SOAP::WsMan::MaxElements;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
+class MaxElements(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::MaxElements
+    WSMan MaxElements node handling.
+    """
+    
+    def __init__(self, max_elements=None, for_pull=None):
+        """
+        Initialize a MaxElements node with a maximum value.
+        
+        Args:
+            max_elements: The maximum number of elements (defaults to 32000)
+            for_pull: Boolean indicating if this is for pull operations
+        """
+        # Use default value of 32000 if max_elements is not provided or is falsy
+        max_value = max_elements if max_elements else 32000
+        
+        # Call parent constructor with max value
+        super().__init__(max_value)
+        
+        # Store the for_pull flag as an instance attribute
+        self._for_pull = for_pull
+    
+    @property
+    def xmlns(self):
+        """
+        Get the XML namespace based on the operation type.
+        
+        Returns:
+            str: 'n' for pull operations, 'w' otherwise
+        """
+        return 'n' if self._for_pull else 'w'
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    MaxElements;
-
-use parent
-    'Node';
-
-sub new {
-    my ($class, $max, $for_pull) = @_;
-
-    my $self = $class->SUPER::new($max || 32000);
-
-    $self->{_for_pull} = $for_pull;
-
-    bless $self, $class;
-    return $self;
-}
-
-sub xmlns {
-    my ($self) = @_;
-    return $self->{_for_pull} ? 'n' : 'w';
-}
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a property that returns different values based on instance state.

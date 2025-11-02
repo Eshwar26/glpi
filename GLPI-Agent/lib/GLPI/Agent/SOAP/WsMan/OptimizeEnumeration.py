@@ -1,17 +1,13 @@
-package GLPI::Agent::SOAP::WsMan::OptimizeEnumeration;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
+class OptimizeEnumeration(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::OptimizeEnumeration
+    WSMan OptimizeEnumeration node handling.
+    """
+    xmlns = 'w'
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    OptimizeEnumeration;
-
-use parent
-    'Node';
-
-use constant    xmlns   => 'w';
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.

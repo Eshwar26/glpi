@@ -1,46 +1,62 @@
-package GLPI::Agent::Task::Inventory::Generic::PCI::Sounds;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Generic PCI Sounds - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, List, Dict
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools.Generic import get_pci_devices
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Generic;
 
-use constant    category    => "sound";
-
-sub isEnabled {
-    return 1;
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    foreach my $sound (_getSounds(logger => $logger)) {
-        $inventory->addEntry(
-            section => 'SOUNDS',
-            entry   => $sound
-        );
-    }
-}
-
-sub _getSounds {
-    my @sounds;
-
-    foreach my $device (getPCIDevices(@_)) {
-        next unless $device->{NAME} =~ /audio/i;
-        push @sounds, {
-            NAME         => $device->{NAME},
-            MANUFACTURER => $device->{MANUFACTURER},
-            DESCRIPTION  => $device->{REV} && "rev $device->{REV}",
-        };
-    }
-
-    return @sounds;
-}
-
-1;
+class Sounds(InventoryModule):
+    """PCI sound cards inventory module."""
+    
+    @staticmethod
+    def category() -> str:
+        """Return the inventory category."""
+        return "sound"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return True
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        sounds = Sounds._get_sounds(logger=logger)
+        
+        for sound in sounds:
+            if inventory:
+                inventory.add_entry(
+                    section='SOUNDS',
+                    entry=sound
+                )
+    
+    @staticmethod
+    def _get_sounds(**params) -> List[Dict[str, str]]:
+        """Get PCI sound cards."""
+        sounds = []
+        
+        for device in get_pci_devices(**params):
+            if not device.get('NAME'):
+                continue
+            if not re.search(r'audio', device['NAME'], re.IGNORECASE):
+                continue
+            
+            sound = {
+                'NAME': device['NAME'],
+                'MANUFACTURER': device.get('MANUFACTURER'),
+            }
+            
+            if device.get('REV'):
+                sound['DESCRIPTION'] = f"rev {device['REV']}"
+            
+            sounds.append(sound)
+        
+        return sounds

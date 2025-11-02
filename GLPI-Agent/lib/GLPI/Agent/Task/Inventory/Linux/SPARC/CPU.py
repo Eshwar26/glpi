@@ -1,52 +1,56 @@
-package GLPI::Agent::Task::Inventory::Linux::SPARC::CPU;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Linux SPARC CPU - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any, List, Dict
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
-
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Linux;
-
-use constant    category    => "cpu";
-
-sub isEnabled {
-    return canRead('/proc/cpuinfo');
-};
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    foreach my $cpu (_getCPUsFromProc(
-        logger => $logger, file => '/proc/cpuinfo'
-    )) {
-        $inventory->addEntry(
-            section => 'CPUS',
-            entry   => $cpu
-        );
-    }
-
-}
-
-sub _getCPUsFromProc {
-    my $cpu = (getCPUsFromProc(@_))[0];
-
-    return unless $cpu && $cpu->{'ncpus probed'};
-
-    my @cpus;
-    foreach (1 .. $cpu->{'ncpus probed'}) {
-        push @cpus, {
-            ARCH => 'sparc',
-            NAME => $cpu->{cpu},
-        };
-    }
-
-    return @cpus;
-}
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_read
+from GLPI.Agent.Tools.Linux import get_cpus_from_proc
 
 
-
-1;
+class CPU(InventoryModule):
+    """SPARC CPU detection module."""
+    
+    category = "cpu"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_read('/proc/cpuinfo')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        for cpu in CPU._get_cpus_from_proc(logger=logger, file='/proc/cpuinfo'):
+            if inventory:
+                inventory.add_entry(section='CPUS', entry=cpu)
+    
+    @staticmethod
+    def _get_cpus_from_proc(**params) -> List[Dict[str, Any]]:
+        """Parse SPARC CPU information from /proc/cpuinfo."""
+        cpus_data = get_cpus_from_proc(**params)
+        if not cpus_data:
+            return []
+        
+        cpu = cpus_data[0]
+        ncpus_probed = cpu.get('ncpus probed')
+        if not ncpus_probed:
+            return []
+        
+        cpus = []
+        try:
+            count = int(ncpus_probed)
+            for _ in range(count):
+                cpus.append({
+                    'ARCH': 'sparc',
+                    'NAME': cpu.get('cpu'),
+                })
+        except (ValueError, TypeError):
+            pass
+        
+        return cpus

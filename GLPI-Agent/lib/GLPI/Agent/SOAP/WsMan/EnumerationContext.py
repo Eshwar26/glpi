@@ -1,18 +1,14 @@
-package GLPI::Agent::SOAP::WsMan::EnumerationContext;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
+class EnumerationContext(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::EnumerationContext
+    WSMan EnumerationContext node handling.
+    """
+    xmlns = 'n'
+    xsd = "http://schemas.xmlsoap.org/ws/2004/09/enumeration"
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    EnumerationContext;
-
-use parent
-    'Node';
-
-use constant    xmlns   => 'n';
-use constant    xsd     => "http://schemas.xmlsoap.org/ws/2004/09/enumeration";
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns and xsd are class attributes.

@@ -1,24 +1,20 @@
-package GLPI::Agent::SOAP::WsMan::ReferenceParameters;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
+class ReferenceParameters(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::ReferenceParameters
+    WSMan ReferenceParameters node handling.
+    """
+    xmlns = 'a'
+    
+    @staticmethod
+    def support():
+        return {
+            'ResourceURI': "w:ResourceURI",
+            'SelectorSet': "w:SelectorSet",
+        }
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    ReferenceParameters;
-
-use parent
-    'Node';
-
-use constant xmlns  => 'a';
-
-sub support {
-    return {
-        ResourceURI => "w:ResourceURI",
-        SelectorSet => "w:SelectorSet",
-    };
-}
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.

@@ -1,86 +1,98 @@
-package GLPI::Agent::Task::Inventory::Generic::Dmidecode::Psu;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Generic Dmidecode Psu - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, Dict, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import get_canonical_manufacturer, get_canonical_power
+from GLPI.Agent.Tools.Generic import get_dmidecode_infos
+from GLPI.Agent.Tools.PartNumber import PartNumber
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Generic;
-use GLPI::Agent::Tools::PartNumber;
 
-use constant    category    => "psu";
-
-sub isEnabled {
-    return 1;
-}
-
-my %fields = (
-    PARTNUM         => 'Model Part Number',
-    SERIALNUMBER    => 'Serial Number',
-    MANUFACTURER    => 'Manufacturer',
-    NAME            => 'Name',
-    STATUS          => 'Status',
-    PLUGGED         => 'Plugged',
-    LOCATION        => 'Location',
-    POWER_MAX       => 'Max Power Capacity',
-    HOTREPLACEABLE  => 'Hot Replaceable',
-);
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-
-    my $infos = getDmidecodeInfos(%params);
-
-    return unless $infos->{39};
-
-    foreach my $info (@{$infos->{39}}) {
-        # Skip battery
-        next if $info->{'Type'} && $info->{'Type'} eq 'Battery';
-
-        my $psu;
-
-        # Add available informations but filter out not filled values
-        foreach my $key (keys(%fields)) {
-            next unless defined($info->{$fields{$key}});
-            next if $info->{$fields{$key}} =~ /To Be Filled By O.?E.?M/i;
-            next if $info->{$fields{$key}} =~ /OEM Define/i;
-            $psu->{$key} = $info->{$fields{$key}};
-        }
-
-        # Get canonical manufacturer
-        $psu->{'MANUFACTURER'} = getCanonicalManufacturer($psu->{'MANUFACTURER'})
-            if $psu->{'MANUFACTURER'};
-
-        # Get canonical max power
-        $psu->{'POWER_MAX'} = getCanonicalPower($psu->{'POWER_MAX'})
-            if $psu->{'POWER_MAX'};
-
-        # Validate PartNumber, as example, this fixes Dell PartNumbers
-        if ($psu->{'PARTNUM'} && $psu->{'MANUFACTURER'}) {
-            my $partnumber_factory = GLPI::Agent::Tools::PartNumber->new(
-                logger  => $params{logger},
-            );
-            my $partnumber = $partnumber_factory->match(
-                partnumber      => $psu->{'PARTNUM'},
-                manufacturer    => $psu->{'MANUFACTURER'},
-                category        => "controller",
-            );
-            $psu->{'PARTNUM'} = $partnumber->get
-                if defined($partnumber);
-        }
-
-        # Filter out PSU if nothing interesting is found
-        next unless $psu;
-        next unless ($psu->{'NAME'} || $psu->{'SERIALNUMBER'} || $psu->{'PARTNUM'});
-
-        $inventory->addEntry(
-            section => 'POWERSUPPLIES',
-            entry   => $psu
-        );
+class Psu(InventoryModule):
+    """Dmidecode PSU inventory module."""
+    
+    FIELDS = {
+        'PARTNUM': 'Model Part Number',
+        'SERIALNUMBER': 'Serial Number',
+        'MANUFACTURER': 'Manufacturer',
+        'NAME': 'Name',
+        'STATUS': 'Status',
+        'PLUGGED': 'Plugged',
+        'LOCATION': 'Location',
+        'POWER_MAX': 'Max Power Capacity',
+        'HOTREPLACEABLE': 'Hot Replaceable',
     }
-}
-
-1;
+    
+    @staticmethod
+    def category() -> str:
+        """Return the inventory category."""
+        return "psu"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return True
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        infos = get_dmidecode_infos(logger=logger)
+        
+        if not infos or not infos.get(39):
+            return
+        
+        for info in infos[39]:
+            # Skip battery
+            if info.get('Type') and info['Type'] == 'Battery':
+                continue
+            
+            psu = {}
+            
+            # Add available informations but filter out not filled values
+            for key, field_name in Psu.FIELDS.items():
+                if field_name not in info:
+                    continue
+                value = info[field_name]
+                if re.search(r'To Be Filled By O\.?E\.?M', value, re.IGNORECASE):
+                    continue
+                if re.search(r'OEM Define', value, re.IGNORECASE):
+                    continue
+                psu[key] = value
+            
+            # Get canonical manufacturer
+            if psu.get('MANUFACTURER'):
+                psu['MANUFACTURER'] = get_canonical_manufacturer(psu['MANUFACTURER'])
+            
+            # Get canonical max power
+            if psu.get('POWER_MAX'):
+                psu['POWER_MAX'] = get_canonical_power(psu['POWER_MAX'])
+            
+            # Validate PartNumber, as example, this fixes Dell PartNumbers
+            if psu.get('PARTNUM') and psu.get('MANUFACTURER'):
+                partnumber_factory = PartNumber(logger=logger)
+                partnumber = partnumber_factory.match(
+                    partnumber=psu['PARTNUM'],
+                    manufacturer=psu['MANUFACTURER'],
+                    category='controller',
+                )
+                if partnumber:
+                    psu['PARTNUM'] = partnumber.get()
+            
+            # Filter out PSU if nothing interesting is found
+            if not psu:
+                continue
+            if not (psu.get('NAME') or psu.get('SERIALNUMBER') or psu.get('PARTNUM')):
+                continue
+            
+            if inventory:
+                inventory.add_entry(
+                    section='POWERSUPPLIES',
+                    entry=psu
+                )

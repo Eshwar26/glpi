@@ -1,17 +1,14 @@
-package GLPI::Agent::SOAP::WsMan::Arguments;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
 
-use GLPI::Agent::SOAP::WsMan::Node;
+class Arguments(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::Arguments
+    WSMan Arguments node handling.
+    """
+    xmlns = 'rsp'
 
-## no critic (ProhibitMultiplePackages)
-package
-    Arguments;
 
-use parent
-    'Node';
-
-use constant    xmlns   => 'rsp';
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.

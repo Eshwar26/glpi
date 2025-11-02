@@ -1,58 +1,65 @@
-package GLPI::Agent::Task::Inventory::HPUX::MP;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory HPUX MP - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_first_match
+from GLPI.Agent.Tools.Network import ip_address_pattern
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Network;
 
-use constant    category    => "network";
-
-#TODO driver pcislot virtualdev
-
-sub isEnabled {
-    return
-        canRun('/opt/hpsmh/data/htdocs/comppage/getMPInfo.cgi') ||
-        canRun('/opt/sfm/bin/CIMUtil');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $ipaddress = canRun('/opt/hpsmh/data/htdocs/comppage/getMPInfo.cgi') ?
-        _parseGetMPInfo(logger => $logger) : _parseCIMUtil(logger => $logger);
-
-    $inventory->addEntry(
-        section => 'NETWORKS',
-        entry => {
-            DESCRIPTION => 'Management Interface - HP MP',
-            TYPE        => 'Ethernet',
-            MANAGEMENT  => 'MP',
-            IPADDRESS   => $ipaddress,
-        }
-    );
-
-}
-
-sub _parseGetMPInfo {
-    return getFirstMatch(
-        command => '/opt/hpsmh/data/htdocs/comppage/getMPInfo.cgi',
-        pattern => qr{RIBLink = "https?://($ip_address_pattern)";},
-        @_
-    );
-}
-
-sub _parseCIMUtil {
-    return getFirstMatch(
-        command => '/opt/sfm/bin/CIMUtil -e root/cimv2 HP_ManagementProcessor',
-        pattern => qr{^IPAddress\s+:\s+($ip_address_pattern)},
-        @_
-    );
-}
-
-1;
+class MP(InventoryModule):
+    """HP-UX Management Processor (MP) network interface detection module."""
+    
+    category = "network"
+    
+    # TODO: driver, pcislot, virtualdev
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return (can_run('/opt/hpsmh/data/htdocs/comppage/getMPInfo.cgi') or
+                can_run('/opt/sfm/bin/CIMUtil'))
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        ipaddress = None
+        if can_run('/opt/hpsmh/data/htdocs/comppage/getMPInfo.cgi'):
+            ipaddress = MP._parse_get_mp_info(logger=logger)
+        else:
+            ipaddress = MP._parse_cim_util(logger=logger)
+        
+        if inventory:
+            inventory.add_entry(
+                section='NETWORKS',
+                entry={
+                    'DESCRIPTION': 'Management Interface - HP MP',
+                    'TYPE': 'Ethernet',
+                    'MANAGEMENT': 'MP',
+                    'IPADDRESS': ipaddress,
+                }
+            )
+    
+    @staticmethod
+    def _parse_get_mp_info(**params) -> Optional[str]:
+        """Parse getMPInfo.cgi output."""
+        return get_first_match(
+            command='/opt/hpsmh/data/htdocs/comppage/getMPInfo.cgi',
+            pattern=rf'RIBLink = "https?://({ip_address_pattern})";',
+            **params
+        )
+    
+    @staticmethod
+    def _parse_cim_util(**params) -> Optional[str]:
+        """Parse CIMUtil output."""
+        return get_first_match(
+            command='/opt/sfm/bin/CIMUtil -e root/cimv2 HP_ManagementProcessor',
+            pattern=rf'^IPAddress\s+:\s+({ip_address_pattern})',
+            **params
+        )

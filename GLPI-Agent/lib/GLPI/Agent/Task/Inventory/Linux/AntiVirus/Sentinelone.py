@@ -1,70 +1,75 @@
-package GLPI::Agent::Task::Inventory::Linux::AntiVirus::Sentinelone;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Linux AntiVirus Sentinelone - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, Optional, Dict
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_all_lines
 
-use UNIVERSAL::require;
 
-use GLPI::Agent::Tools;
-
-sub isEnabled {
-    return canRun('/opt/sentinelone/bin/sentinelctl');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $antivirus = _getSentineloneInfo(logger => $logger);
-    if ($antivirus) {
-        $inventory->addEntry(
-            section => 'ANTIVIRUS',
-            entry   => $antivirus
-        );
-
-        $logger->debug2("Added $antivirus->{NAME}" . ($antivirus->{VERSION} ? " v$antivirus->{VERSION}" : ""))
-            if $logger;
-    }
-}
-
-sub _getSentineloneInfo {
-    my (%params) = @_;
-
-    my $cmd = '/opt/sentinelone/bin/sentinelctl';
-
-    my @output = getAllLines(
-        command => "$cmd version && $cmd engines status && $cmd control status && $cmd management status",
-        %params
-    )
-        or return;
-
-    my $av = {
-        NAME     => 'SentinelAgent',
-        COMPANY  => 'SentinelOne',
-        ENABLED  => 0,
-        UPTODATE => 0,
-    };
-
-    foreach my $line (@output) {
-        my ($key, $value) = $line =~ /(.+)(?:: |(?<!\s)\s{2,})(.*)/
-            or next;
-        if ($key eq "Agent version") {
-            $av->{VERSION} = $value;
-        } elsif ($key eq "DFI library version") {
-            $av->{BASE_VERSION} = $value;
-        } elsif ($key eq "Agent state") {
-            $av->{ENABLED} = $value eq "Enabled" ? 1 : 0;
-        } elsif ($key eq "Connectivity") {
-            # SentinelAgent does not directly report "uptodate" status but we can assume it is updated if the cloud connectivity is working.
-            $av->{UPTODATE} = $value eq "On" ? 1 : 0;
+class Sentinelone(InventoryModule):
+    """SentinelOne detection module for Linux."""
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('/opt/sentinelone/bin/sentinelctl')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        antivirus = Sentinelone._get_sentinelone_info(logger=logger)
+        if antivirus:
+            if inventory:
+                inventory.add_entry(
+                    section='ANTIVIRUS',
+                    entry=antivirus
+                )
+            
+            if logger:
+                version_str = f" v{antivirus['VERSION']}" if antivirus.get('VERSION') else ""
+                logger.debug2(f"Added {antivirus['NAME']}{version_str}")
+    
+    @staticmethod
+    def _get_sentinelone_info(**params) -> Optional[Dict[str, Any]]:
+        """Get SentinelOne information."""
+        cmd = '/opt/sentinelone/bin/sentinelctl'
+        
+        output = get_all_lines(
+            command=f'{cmd} version && {cmd} engines status && {cmd} control status && {cmd} management status',
+            **params
+        )
+        if not output:
+            return None
+        
+        av = {
+            'NAME': 'SentinelAgent',
+            'COMPANY': 'SentinelOne',
+            'ENABLED': 0,
+            'UPTODATE': 0,
         }
-    }
-
-    return $av;
-}
-
-1;
+        
+        for line in output:
+            # Match pattern: "key: value" or "key  value" (with 2+ spaces)
+            match = re.match(r'(.+)(?:: |(?<!\s)\s{2,})(.*)', line)
+            if not match:
+                continue
+            
+            key, value = match.groups()
+            if key == 'Agent version':
+                av['VERSION'] = value
+            elif key == 'DFI library version':
+                av['BASE_VERSION'] = value
+            elif key == 'Agent state':
+                av['ENABLED'] = 1 if value == 'Enabled' else 0
+            elif key == 'Connectivity':
+                # SentinelAgent does not directly report "uptodate" status but we can assume it is updated if the cloud connectivity is working.
+                av['UPTODATE'] = 1 if value == 'On' else 0
+        
+        return av

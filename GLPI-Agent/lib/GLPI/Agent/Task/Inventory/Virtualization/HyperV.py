@@ -1,113 +1,116 @@
-package GLPI::Agent::Task::Inventory::Virtualization::HyperV;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Virtualization HyperV - Python Implementation
+"""
 
-use strict;
-use warnings;
+import sys
+from typing import Any, List, Dict
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools.Virtualization import (STATUS_RUNNING, STATUS_OFF, STATUS_PAUSED,
+                                             STATUS_BLOCKED, STATUS_SHUTDOWN)
 
-use English qw(-no_match_vars);
-use UNIVERSAL::require;
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Virtualization;
-
-sub isEnabled {
-    return OSNAME eq 'MSWin32';
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-
-    foreach my $machine (_getVirtualMachines()) {
-        $inventory->addEntry(
-            section => 'VIRTUALMACHINES', entry => $machine
-        );
-    }
-}
-
-sub _getVirtualMachines {
-
-    GLPI::Agent::Tools::Win32->require();
-
-    my @machines;
-
-    # index memory, cpu and BIOS UUID information
-    my %memory;
-    foreach my $object (GLPI::Agent::Tools::Win32::getWMIObjects(
-        moniker    => 'winmgmts://./root/virtualization/v2',
-        altmoniker => 'winmgmts://./root/virtualization',
-        class      => 'MSVM_MemorySettingData',
-        properties => [ qw/InstanceID VirtualQuantity/ ]
-    )) {
-        my $id = $object->{InstanceID};
-        next unless $id =~ /^Microsoft:([^\\]+)/;
-        $memory{$1} = $object->{VirtualQuantity};
-    }
-
-    my %vcpu;
-    foreach my $object (GLPI::Agent::Tools::Win32::getWMIObjects(
-        moniker    => 'winmgmts://./root/virtualization/v2',
-        altmoniker => 'winmgmts://./root/virtualization',
-        class      => 'MSVM_ProcessorSettingData',
-        properties => [ qw/InstanceID VirtualQuantity/ ]
-    )) {
-        my $id = $object->{InstanceID};
-        next unless $id =~ /^Microsoft:([^\\]+)/;
-        $vcpu{$1} = $object->{VirtualQuantity};
-    }
-
-    my %biosguid;
-    foreach my $object (GLPI::Agent::Tools::Win32::getWMIObjects(
-        moniker    => 'winmgmts://./root/virtualization/v2',
-        altmoniker => 'winmgmts://./root/virtualization',
-        class      => 'MSVM_VirtualSystemSettingData',
-        properties => [ qw/InstanceID BIOSGUID/ ]
-    )) {
-        my $id = $object->{InstanceID};
-        next unless $object->{BIOSGUID} && $id =~ /^Microsoft:([^\\]+)/;
-        $biosguid{$1} = $object->{BIOSGUID};
-        $biosguid{$1} =~ tr/{}//d;
-    }
-
-    foreach my $object (GLPI::Agent::Tools::Win32::getWMIObjects(
-        moniker    => 'winmgmts://./root/virtualization/v2',
-        altmoniker => 'winmgmts://./root/virtualization',
-        class      => 'MSVM_ComputerSystem',
-        properties => [ qw/ElementName EnabledState Name InstallDate/ ]
-    )) {
-        # skip host as if has no InstallDate,
-        # see https://docs.microsoft.com/en-us/windows/desktop/hyperv_v2/msvm-computersystem
-        next unless $object->{InstallDate};
-
-        my $status =
-            $object->{EnabledState} == 2     ? STATUS_RUNNING  :
-            $object->{EnabledState} == 3     ? STATUS_OFF      :
-            $object->{EnabledState} == 32768 ? STATUS_PAUSED   :
-            $object->{EnabledState} == 32769 ? STATUS_OFF      :
-            $object->{EnabledState} == 32770 ? STATUS_BLOCKED  :
-            $object->{EnabledState} == 32771 ? STATUS_BLOCKED  :
-            $object->{EnabledState} == 32773 ? STATUS_BLOCKED  :
-            $object->{EnabledState} == 32774 ? STATUS_SHUTDOWN :
-            $object->{EnabledState} == 32776 ? STATUS_BLOCKED  :
-            $object->{EnabledState} == 32777 ? STATUS_BLOCKED  :
-                                               STATUS_OFF      ;
-        my $machine = {
-            SUBSYSTEM => 'MS HyperV',
-            VMTYPE    => 'HyperV',
-            STATUS    => $status,
-            NAME      => $object->{ElementName},
-            UUID      => $biosguid{$object->{Name}},
-            MEMORY    => $memory{$object->{Name}},
-            VCPU      => $vcpu{$object->{Name}},
-        };
-
-        push @machines, $machine;
-
-    }
-
-    return @machines;
-}
-
-1;
+class HyperV(InventoryModule):
+    """Microsoft Hyper-V virtual machines detection module."""
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return sys.platform == 'win32'
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        
+        for machine in HyperV._get_virtual_machines():
+            if inventory:
+                inventory.add_entry(
+                    section='VIRTUALMACHINES',
+                    entry=machine
+                )
+    
+    @staticmethod
+    def _get_virtual_machines() -> List[Dict[str, Any]]:
+        """Get Hyper-V virtual machines via WMI."""
+        try:
+            from GLPI.Agent.Tools.Win32 import get_wmi_objects
+        except ImportError:
+            return []
+        
+        machines = []
+        
+        # index memory, cpu and BIOS UUID information
+        memory = {}
+        for obj in get_wmi_objects(
+            moniker='winmgmts://./root/virtualization/v2',
+            altmoniker='winmgmts://./root/virtualization',
+            class_name='MSVM_MemorySettingData',
+            properties=['InstanceID', 'VirtualQuantity']
+        ):
+            instance_id = obj.get('InstanceID', '')
+            if instance_id.startswith('Microsoft:'):
+                vm_id = instance_id.split('Microsoft:')[1].split('\\')[0]
+                memory[vm_id] = obj.get('VirtualQuantity')
+        
+        vcpu = {}
+        for obj in get_wmi_objects(
+            moniker='winmgmts://./root/virtualization/v2',
+            altmoniker='winmgmts://./root/virtualization',
+            class_name='MSVM_ProcessorSettingData',
+            properties=['InstanceID', 'VirtualQuantity']
+        ):
+            instance_id = obj.get('InstanceID', '')
+            if instance_id.startswith('Microsoft:'):
+                vm_id = instance_id.split('Microsoft:')[1].split('\\')[0]
+                vcpu[vm_id] = obj.get('VirtualQuantity')
+        
+        biosguid = {}
+        for obj in get_wmi_objects(
+            moniker='winmgmts://./root/virtualization/v2',
+            altmoniker='winmgmts://./root/virtualization',
+            class_name='MSVM_VirtualSystemSettingData',
+            properties=['InstanceID', 'BIOSGUID']
+        ):
+            instance_id = obj.get('InstanceID', '')
+            bios_guid = obj.get('BIOSGUID')
+            if bios_guid and instance_id.startswith('Microsoft:'):
+                vm_id = instance_id.split('Microsoft:')[1].split('\\')[0]
+                biosguid[vm_id] = bios_guid.replace('{', '').replace('}', '')
+        
+        for obj in get_wmi_objects(
+            moniker='winmgmts://./root/virtualization/v2',
+            altmoniker='winmgmts://./root/virtualization',
+            class_name='MSVM_ComputerSystem',
+            properties=['ElementName', 'EnabledState', 'Name', 'InstallDate']
+        ):
+            # skip host as it has no InstallDate
+            if not obj.get('InstallDate'):
+                continue
+            
+            enabled_state = obj.get('EnabledState', 0)
+            status = (
+                STATUS_RUNNING if enabled_state == 2 else
+                STATUS_OFF if enabled_state == 3 else
+                STATUS_PAUSED if enabled_state == 32768 else
+                STATUS_OFF if enabled_state == 32769 else
+                STATUS_BLOCKED if enabled_state in [32770, 32771, 32773, 32776, 32777] else
+                STATUS_SHUTDOWN if enabled_state == 32774 else
+                STATUS_OFF
+            )
+            
+            name = obj.get('Name', '')
+            machine = {
+                'SUBSYSTEM': 'MS HyperV',
+                'VMTYPE': 'HyperV',
+                'STATUS': status,
+                'NAME': obj.get('ElementName'),
+                'UUID': biosguid.get(name),
+                'MEMORY': memory.get(name),
+                'VCPU': vcpu.get(name)
+            }
+            
+            machines.append(machine)
+        
+        return machines

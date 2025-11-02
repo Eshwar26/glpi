@@ -1,23 +1,24 @@
-package GLPI::Agent::SOAP::WsMan::Identify;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
+class Identify(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::Identify
+    WSMan Identify node handling.
+    """
+    xmlns = 'wsmid'
+    xsd = "http://schemas.dmtf.org/wbem/wsman/identity/1/wsmanidentity.xsd"
+    
+    @staticmethod
+    def request():
+        """
+        Generate the identify request.
+        
+        Returns:
+            dict: Dictionary with identify request key-value pair
+        """
+        return {f"{Identify.xmlns}:Identify": ""}
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    Identify;
-
-use parent
-    'Node';
-
-# Constants needed in parent class
-use constant    xmlns   => 'wsmid';
-use constant    xsd     => "http://schemas.dmtf.org/wbem/wsman/identity/1/wsmanidentity.xsd";
-
-sub request {
-    return xmlns.":Identify" => "";
-}
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns and xsd are class attributes.

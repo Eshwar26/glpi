@@ -1,102 +1,115 @@
-package GLPI::Agent::SOAP::WsMan::EnumerateResponse;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
+# from glpi.agent.soap.wsman.enumeration_context import EnumerationContext
+# from glpi.agent.soap.wsman.end_of_sequence import EndOfSequence
 
-use strict;
-use warnings;
-
-use GLPI::Agent::SOAP::WsMan::Node;
-
-BEGIN {
-    # Needed for PullResponse class
-    $INC{'EnumerateResponse.pm'} = __FILE__;
-}
-
-## no critic (ProhibitMultiplePackages)
-package
-    EnumerateResponse;
-
-use parent
-    'Node';
-
-use GLPI::Agent::Tools;
-use GLPI::Agent::SOAP::WsMan::EnumerationContext;
-use GLPI::Agent::SOAP::WsMan::EndOfSequence;
-
-use constant    xmlns   => 'n';
-
-sub new {
-    my ($class, @enum) = @_;
-
-    my $self = $class->SUPER::new(@enum);
-
-    bless $self, $class;
-
-    $self->push( EndOfSequence->new() ) unless @enum;
-
-    return $self;
-}
-
-sub support {
-    return {
-        EnumerationContext  => "n:EnumerationContext",
-        Items               => "w:Items",
-        EndOfSequence       => "w:EndOfSequence",
-    };
-}
-
-sub items {
-    my ($self) = @_;
-
-    my @items;
-    foreach my $items ($self->nodes("Items")) {
-        foreach my $item ($items->nodes()) {
-            push @items, _dump($item);
+class EnumerateResponse(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::EnumerateResponse
+    WSMan EnumerateResponse node handling.
+    """
+    xmlns = 'n'
+    
+    def __init__(self, *enum):
+        """
+        Initialize an EnumerateResponse node with optional enumeration items.
+        
+        Args:
+            *enum: Variable arguments for enumeration items
+        """
+        # Call parent constructor with all parameters
+        super().__init__(*enum)
+        
+        # If no parameters provided, add EndOfSequence
+        if not enum:
+            self.push(EndOfSequence())
+    
+    @staticmethod
+    def support():
+        return {
+            'EnumerationContext': "n:EnumerationContext",
+            'Items': "w:Items",
+            'EndOfSequence': "w:EndOfSequence",
         }
-    }
+    
+    def items(self):
+        """
+        Extract and return all items from the response.
+        
+        Returns:
+            list: List of dictionaries representing items
+        """
+        items = []
+        for items_node in self.nodes("Items"):
+            for item in items_node.nodes():
+                items.extend(self._dump(item))
+        
+        return items
+    
+    def end_of_sequence(self):
+        """
+        Find and return the EndOfSequence node if present.
+        
+        Returns:
+            EndOfSequence or None: The EndOfSequence node if found
+        """
+        for node in self.nodes():
+            if type(node).__name__ == "EndOfSequence":
+                return node
+        return None
+    
+    def _dump(self, object_node):
+        """
+        Recursively dump node content to dictionary format.
+        
+        Args:
+            object_node: The node to dump
+            
+        Returns:
+            list: List of dictionaries representing the node data
+        """
+        dump_list = []
+        dump_dict = {}
+        
+        for node in object_node.nodes():
+            key = type(node).__name__
+            nil = node.attribute('xsi:nil')
+            nodes = node.nodes()
+            
+            if nil and nil == 'true':
+                dump_dict[key] = None
+            elif node.attribute('xsi:type'):
+                dump_list.extend(self._dump(node))
+                dump_dict = None
+            elif type(node).__name__ and hasattr(node, 'dump_as_string') and node.dump_as_string():
+                dump_dict[key] = node.string()
+            else:
+                if len(nodes) > 1:
+                    dump_dict[key] = [n.string() for n in nodes]
+                else:
+                    dump_dict[key] = node.string()
+        
+        if dump_dict is not None:
+            dump_list.append(dump_dict)
+        
+        return dump_list
+    
+    def context(self):
+        """
+        Get the EnumerationContext from the response.
+        
+        Returns:
+            EnumerationContext: The context node, or a new one if not found
+        """
+        context_node = self.get('EnumerationContext')
+        
+        if context_node:
+            context_node.set_namespace()
+            return context_node
+        
+        return EnumerationContext()
 
-    return @items;
-}
 
-sub end_of_sequence {
-    my ($self) = @_;
-
-    return first { ref($_) eq "EndOfSequence" } $self->nodes();
-}
-
-sub _dump {
-    my ($object) = @_;
-
-    my @dump = ();
-
-    my $dump = {};
-
-    foreach my $node ($object->nodes()) {
-        my $key = ref($node);
-        my $nil = $node->attribute('xsi:nil');
-        my @nodes = $node->nodes();
-        if ($nil && $nil eq 'true') {
-            $dump->{$key} = undef;
-        } elsif ($node->attribute('xsi:type')) {
-            push @dump, _dump($node);
-            undef $dump;
-        } elsif (ref($node) && $node->dump_as_string()) {
-            $dump->{$key} = $node->string;
-        } else {
-            $dump->{$key} = @nodes > 1 ? [ map { $_->string } @nodes ] : $node->string;
-        }
-    }
-    push @dump, $dump if $dump;
-
-    return @dump;
-}
-
-sub context {
-    my ($self) = @_;
-
-    my ($context) = $self->get('EnumerationContext');
-
-    $context->set_namespace() if $context;
-
-    return $context // EnumerationContext->new();
-}
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.
+# The BEGIN block's $INC manipulation is not needed in Python's import system.

@@ -1,47 +1,62 @@
-package GLPI::Agent::Task::Inventory::Linux::PowerPC::Bios;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Linux PowerPC Bios - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import get_first_line
 
-use GLPI::Agent::Tools;
 
-use constant    category    => "bios";
-
-sub isEnabled {
-    return 1;
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-
-    my $bios;
-
-    $bios->{SSN} = getFirstLine(file => '/proc/device-tree/serial-number');
-    $bios->{SSN} =~ s/[^\,^\.^\w^\ ]//g; # I remove some unprintable char
-
-    $bios->{SMODEL} = getFirstLine(file => '/proc/device-tree/model');
-    $bios->{SMODEL} =~ s/[^\,^\.^\w^\ ]//g;
-
-    my $colorCode = getFirstLine(file => '/proc/device-tree/color-code');
-    my ($color) = unpack "h7" , $colorCode;
-    $bios->{SMODEL} .= " color: $color" if $color;
-
-    $bios->{BVERSION} =
-        getFirstLine(file => '/proc/device-tree/openprom/model');
-    $bios->{BVERSION} =~ s/[^\,^\.^\w^\ ]//g;
-
-    my $copyright = getFirstLine(file => '/proc/device-tree/copyright');
-    if ($copyright && $copyright =~ /Apple/) {
-        # What about the Apple clone?
-        $bios->{BMANUFACTURER} = "Apple Computer, Inc.";
-        $bios->{SMANUFACTURER} = "Apple Computer, Inc.";
-    }
-
-    $inventory->setBios($bios);
-}
-
-1;
+class Bios(InventoryModule):
+    """PowerPC BIOS detection module."""
+    
+    category = "bios"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return True
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        
+        bios = {}
+        
+        ssn = get_first_line(file='/proc/device-tree/serial-number')
+        if ssn:
+            # Remove some unprintable chars
+            bios['SSN'] = re.sub(r'[^\,^\.^\w^\ ]', '', ssn)
+        
+        smodel = get_first_line(file='/proc/device-tree/model')
+        if smodel:
+            smodel = re.sub(r'[^\,^\.^\w^\ ]', '', smodel)
+            
+            color_code = get_first_line(file='/proc/device-tree/color-code')
+            if color_code:
+                # Unpack color code
+                try:
+                    color = color_code.encode('latin-1').hex()[:7]
+                    if color:
+                        smodel += f" color: {color}"
+                except Exception:
+                    pass
+            
+            bios['SMODEL'] = smodel
+        
+        bversion = get_first_line(file='/proc/device-tree/openprom/model')
+        if bversion:
+            bios['BVERSION'] = re.sub(r'[^\,^\.^\w^\ ]', '', bversion)
+        
+        copyright_text = get_first_line(file='/proc/device-tree/copyright')
+        if copyright_text and 'Apple' in copyright_text:
+            # What about the Apple clone?
+            bios['BMANUFACTURER'] = 'Apple Computer, Inc.'
+            bios['SMANUFACTURER'] = 'Apple Computer, Inc.'
+        
+        if inventory:
+            inventory.set_bios(bios)

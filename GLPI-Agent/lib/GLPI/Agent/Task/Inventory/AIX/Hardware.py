@@ -1,32 +1,37 @@
-package GLPI::Agent::Task::Inventory::AIX::Hardware;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory AIX Hardware - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import uname
 
-use English qw(-no_match_vars);
 
-use GLPI::Agent::Tools;
-
-use constant    category    => "hardware";
-
-sub isEnabled {
-    return 1;
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-
-    my $unameL = Uname("-L");
-    # LPAR partition can access the serial number of the host computer
-    if ($unameL && $unameL =~ /^(\d+)\s+(\S+)/) {
-        $inventory->setHardware({
-            VMSYSTEM    => "AIX_LPAR",
-        });
-    }
-}
-
-1;
+class Hardware(InventoryModule):
+    """AIX Hardware inventory module."""
+    
+    @staticmethod
+    def category() -> str:
+        """Return the inventory category."""
+        return "hardware"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return True
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        
+        uname_l = uname("-L")
+        # LPAR partition can access the serial number of the host computer
+        if uname_l and re.match(r'^(\d+)\s+(\S+)', uname_l):
+            if inventory:
+                inventory.set_hardware({
+                    'VMSYSTEM': 'AIX_LPAR',
+                })

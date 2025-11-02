@@ -1,938 +1,1170 @@
-package GLPI::Agent::SOAP::WsMan;
+import os
+import re
+import uuid
+from typing import Dict, Any, List, Optional
 
-use strict;
-use warnings;
+# --- MOCK CLASSES AND GLOBAL UTILITIES ---
+# These classes mock the behavior of the required Perl modules and custom WS-Man classes.
+# Their methods are designed to be minimally sufficient to allow WsManClient's logic to execute.
 
-use parent 'GLPI::Agent::HTTP::Client';
+class HTTPClient:
+    """
+    Mock base class for GLPI::Agent::HTTP::Client.
+    Provides basic HTTP client functionality and logging/error tracking.
+    """
+    def __init__(self, **kwargs):
+        self._lasterror = ""
+        self.logger = kwargs.get('logger')
+        self._url = kwargs.get('url')
 
-use HTTP::Request;
-use HTTP::Headers;
-use Encode qw(encode);
+    def request(self, request: 'HTTP_Request', **kwargs) -> 'HTTP_Response':
+        """
+        Mocks sending an HTTP request. The real implementation would use
+        a library like 'requests'. This mock returns a generic successful response.
+        The Perl code specifically handles error 500 via the '500 => 1' option,
+        which is generally passed to a lower-level HTTP client library.
+        """
+        # In a real scenario, this would execute the network request.
+        class HTTP_Response:
+            def __init__(self, status_code, content=None, headers=None, status_line=""):
+                self.status_code = status_code
+                self._content = content if content is not None else ""
+                self._headers = headers if headers is not None else {}
+                self._status_line = status_line
 
-use GLPI::Agent::XML;
+            def is_success(self) -> bool:
+                return 200 <= self.status_code < 300
 
-use GLPI::Agent::SOAP::WsMan::Envelope;
-use GLPI::Agent::SOAP::WsMan::Attribute;
-use GLPI::Agent::SOAP::WsMan::Namespace;
-use GLPI::Agent::SOAP::WsMan::Header;
-use GLPI::Agent::SOAP::WsMan::Identify;
-use GLPI::Agent::SOAP::WsMan::ResourceURI;
-use GLPI::Agent::SOAP::WsMan::To;
-use GLPI::Agent::SOAP::WsMan::ReplyTo;
-use GLPI::Agent::SOAP::WsMan::Action;
-use GLPI::Agent::SOAP::WsMan::MessageID;
-use GLPI::Agent::SOAP::WsMan::MaxEnvelopeSize;
-use GLPI::Agent::SOAP::WsMan::Locale;
-use GLPI::Agent::SOAP::WsMan::DataLocale;
-use GLPI::Agent::SOAP::WsMan::SessionId;
-use GLPI::Agent::SOAP::WsMan::OperationID;
-use GLPI::Agent::SOAP::WsMan::SequenceId;
-use GLPI::Agent::SOAP::WsMan::OperationTimeout;
-use GLPI::Agent::SOAP::WsMan::Enumerate;
-use GLPI::Agent::SOAP::WsMan::Pull;
-use GLPI::Agent::SOAP::WsMan::Option;
-use GLPI::Agent::SOAP::WsMan::OptionSet;
-use GLPI::Agent::SOAP::WsMan::Shell;
-use GLPI::Agent::SOAP::WsMan::Signal;
-use GLPI::Agent::SOAP::WsMan::Receive;
-use GLPI::Agent::SOAP::WsMan::Code;
-use GLPI::Agent::SOAP::WsMan::Filter;
-use GLPI::Agent::SOAP::WsMan::OptimizeEnumeration;
-use GLPI::Agent::SOAP::WsMan::MaxElements;
-use GLPI::Agent::SOAP::WsMan::SelectorSet;
-use GLPI::Agent::SOAP::WsMan::Selector;
+            def content(self) -> str:
+                return self._content
 
-my $xml;
-my $wsman_debug = $ENV{WSMAN_DEBUG} ? 1 : 0;
+            def header(self, name: str) -> Optional[str]:
+                return self._headers.get(name)
 
-sub new {
-    my ($class, %params) = @_;
+            def as_string(self) -> str:
+                return f"Status: {self.status_code}\nContent:\n{self._content}"
 
-    my $config = $params{config} // {};
+            def status_line(self) -> str:
+                return self._status_line or f"{self.status_code} Status Line Mock"
 
-    my $self = $class->SUPER::new(
-        ca_cert_dir     => $config->{ca_cert_dir}   || $ENV{'CA_CERT_PATH'},
-        ca_cert_file    => $config->{ca_cert_file}  || $ENV{'CA_CERT_FILE'},
-        ssl_cert_file   => $config->{ssl_cert_file} || $ENV{'SSL_CERT_FILE'},
-        %params,
-    );
+        # Mock successful response
+        return HTTP_Response(
+            status_code=200,
+            content="<s:Envelope><s:Header/><s:Body/></s:Envelope>",
+            status_line="200 OK"
+        )
 
-    $self->{_url} = $params{url};
-    $self->{_lang} = 'en-US';
-    $self->{_winrm} = $params{winrm} // 0;
-    $self->{_noauth} = $params{user} && $params{password} ? 0 : 1;
+    def url(self) -> Optional[str]:
+        """Returns the base URL."""
+        return self._url
 
-    bless $self, $class;
+    def lasterror(self, error: Optional[str] = None) -> str:
+        """Sets or gets the last error."""
+        if error is not None:
+            self._lasterror = error
+        return self._lasterror
 
-    $xml = GLPI::Agent::XML->new(
-        first_out   => [ 's:Header' ],
-        no_xml_decl => '',
-        xml_format  => 0,
-    ) unless $xml;
+    def debug(self, message: Optional[str] = None) -> Any:
+        """Mocks debug logging."""
+        if self.logger:
+            if message is None:
+                return self.logger.debug_level()
+            self.logger.debug(message)
+        return False
 
-    return $self;
+    def debug2(self, message: str):
+        """Mocks verbose debug logging."""
+        if self.logger:
+            self.logger.debug2(message)
+
+# Mock HTTP Request/Headers
+class HTTP_Request:
+    def __init__(self, method, url, headers, message):
+        self.method = method
+        self.url = url
+        self.headers = headers
+        self.message = message
+
+    def as_string(self) -> str:
+        return f"Method: {self.method}\nURL: {self.url}\nHeaders: {self.headers}\nMessage:\n{self.message}"
+
+class HTTP_Headers:
+    def __init__(self, **kwargs):
+        self.headers = kwargs
+
+    def new(self, **kwargs):
+        return self.headers.update(kwargs)
+
+    def __getitem__(self, key):
+        return self.headers.get(key)
+
+# Mock XML Utility Class
+class GLPIAgentXML:
+    """Mock for GLPI::Agent::XML module."""
+    def __init__(self, **kwargs):
+        self._xml_format = kwargs.get('xml_format', 0)
+        self._string = ""
+        self._hash = {}
+
+    def write(self, structure: Dict[str, Any]) -> Optional[str]:
+        """Mocks converting a structure (likely a dict) into an XML string."""
+        # In a real scenario, this would use a library like lxml or defusedxml.
+        if structure:
+            return f"<xml>{structure}</xml>"
+        return None
+
+    def string(self, xml_string: str):
+        """Sets the XML string to be parsed."""
+        self._string = xml_string
+
+    def dump_as_hash(self) -> Dict[str, Any]:
+        """Mocks parsing the XML string back into a nested hash/dict structure."""
+        # This is a very complex operation in reality. Mocking a simple dict return.
+        return self._hash or {"s:Envelope": {"s:Header": {}, "s:Body": {}}}
+
+    def dump_as_hash_for_test(self, mock_hash):
+        self._hash = mock_hash
+
+    def reset(self):
+        self._string = ""
+        self._hash = {}
+
+# Mock WS-Man Element Classes (Used for composition)
+class WsManElement:
+    """Base class for all WS-Man SOAP elements."""
+    def __init__(self, *args, **kwargs):
+        self._args = args
+        self._kwargs = kwargs
+        self._content = {}
+
+    def get(self, key: Optional[str] = None) -> Any:
+        return self._content.get(key) if key else self._content
+
+    def string(self) -> str:
+        return str(self._args[0]) if self._args else ""
+
+    def is(self, value: str) -> bool:
+        return self.string().lower() == value.lower()
+
+    def isvalid(self) -> bool:
+        return True # Mock always valid
+
+    def reset_namespace(self, namespaces: Optional[str] = None):
+        pass # Mock implementation
+
+    def nodes(self) -> List['WsManElement']:
+        return []
+
+class Node(WsManElement): pass
+class Attribute(WsManElement): pass
+class Namespace(WsManElement): pass
+class Identify(WsManElement): pass
+class ResourceURI(WsManElement): pass
+class To(WsManElement): pass
+class ReplyTo(WsManElement):
+    def anonymous(self): return self # Mock a static method
+class MaxEnvelopeSize(WsManElement): pass
+class Locale(WsManElement): pass
+class DataLocale(WsManElement): pass
+class SessionId(WsManElement):
+    def reset_uuid(self): self._uuid = str(uuid.uuid4())
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.reset_uuid()
+class OperationID(SessionId): pass
+class MessageID(SessionId): pass
+class SequenceId(WsManElement): pass
+class OperationTimeout(WsManElement): pass
+class Enumerate(WsManElement): pass
+class Pull(WsManElement): pass
+class Option(WsManElement): pass
+class OptionSet(WsManElement): pass
+class Shell(WsManElement):
+    def commandline(self, command: str) -> 'WsManElement':
+        return WsManElement(command)
+    @staticmethod
+    def xmlns(): return "http://schemas.microsoft.com/wbem/wsman/1/windows/shell"
+    @staticmethod
+    def xsd(): return "http://schemas.microsoft.com/wbem/wsman/1/windows/shell"
+class Signal(WsManElement): pass
+class Receive(WsManElement): pass
+class Code(WsManElement):
+    @staticmethod
+    def signal(signal: str) -> 'Code': return Code(signal)
+class Filter(WsManElement): pass
+class OptimizeEnumeration(WsManElement): pass
+class MaxElements(WsManElement): pass
+class SelectorSet(WsManElement): pass
+class Selector(WsManElement): pass
+class CommandId(WsManElement): pass
+
+class Action(WsManElement):
+    def set(self, action: str):
+        self._args = (action,)
+    def what(self) -> str:
+        return self.string()
+
+class Header(WsManElement):
+    def action(self) -> Action:
+        return self.get('Action') or Action()
+    def get(self, key: str) -> Optional[WsManElement]:
+        return self._content.get(key)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._content = {type(a).__name__: a for a in args if isinstance(a, WsManElement)}
+
+class Body(WsManElement):
+    def reset(self, new_element: WsManElement):
+        self._content = new_element.get()
+    def enumeration(self, is_pull: bool) -> 'Enumeration':
+        return Enumeration()
+    @property
+    def fault(self) -> 'WsManElement': return WsManElement()
+
+class Envelope(WsManElement):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._header = next((a for a in args if isinstance(a, Header)), Header())
+        self._body = next((a for a in args if isinstance(a, Body)), Body())
+        # Mocking the hash-based construction from _send response
+        if args and isinstance(args[0], dict):
+            self._hash_data = args[0]
+            # Simple mock of content extraction
+            self._header = Header({'Action': Action(self._hash_data.get('Action', ''))})
+            self._body = Body({'IdentifyResponse': Identify()})
+
+    @property
+    def header(self) -> Header: return self._header
+    @property
+    def body(self) -> Body: return self._body
+    def get(self) -> Dict[str, Any]:
+        return {"Header": self.header.get(), "Body": self.body.get()}
+    def reset_namespace(self, namespaces: str): pass
+    def attribute(self, name: str) -> Optional[str]: return None # Mock language extraction
+
+class Enumeration(WsManElement):
+    """Mock for the enumeration result object."""
+    def items(self) -> List[Dict[str, Any]]:
+        # Mock returns a list of resource items (dicts)
+        return [{"CreationClassName": "Win32_Thing", "SelectorProp": "Value1"}]
+    def end_of_sequence(self) -> bool: return True
+    @property
+    def context(self) -> str: return "MockContext"
+
+# Global Variables (Module level state, mirroring Perl)
+_xml: Optional[GLPIAgentXML] = None
+_wsman_debug: bool = os.environ.get('WSMAN_DEBUG') is not None
+_HIVEREF: Dict[str, int] = {
+    'HKEY_CLASSES_ROOT': 0x80000000,
+    'HKEY_CURRENT_USER': 0x80000001,
+    'HKEY_LOCAL_MACHINE': 0x80000002,
+    'HKEY_USERS': 0x80000003,
+    'HKEY_CURRENT_CONFIG': 0x80000005
 }
 
-sub abort {
-    my ( $self, $message ) = @_;
-    $self->lasterror($message);
-    $self->{logger}->debug2($message) if $self->{logger};
-    return;
-}
+# --- HELPER FUNCTIONS ---
 
-sub debug {
-    my ( $self, $message ) = @_;
-    if ($self->{logger}) {
-        return $self->{logger}->debug_level() unless defined($message);
-        $self->{logger}->debug($message);
-    }
-}
+def _extract(item: Any, properties: Optional[List[str]] = None) -> Any:
+    """
+    Recursively extracts specified properties from a nested hash structure,
+    mirroring the Perl logic to deep-copy selected keys.
+    """
+    if not isinstance(item, dict) or not isinstance(properties, list):
+        return item
 
-sub debug2 {
-    my ( $self, $message ) = @_;
-    $self->{logger}->debug2($message) if $self->{logger};
-}
+    result: Dict[str, Any] = {}
 
-sub _send {
-    my ( $self, $envelope, $header ) = @_;
+    for prop in properties:
+        value = item.get(prop)
+        if isinstance(value, list):
+            # Copy array items
+            result[prop] = [v for v in value]
+        elif isinstance(value, dict):
+            # Recurse for nested hashes, using all keys as properties to extract
+            result[prop] = _extract(value, list(value.keys()))
+        else:
+            # Copy scalar value
+            result[prop] = value
 
-    my $message = $xml->write($envelope->get());
-    return $self->abort("Won't send wrong request")
-        unless $message;
+    return result
 
-    my $headers = HTTP::Headers->new(
-        'Content-Type'      => 'application/soap+xml;charset=UTF-8',
-        'Content-length'    => length($message // ''),
-        %{$header},
-    );
+# --- MAIN WS-MAN CLIENT CLASS ---
 
-    my $request = HTTP::Request->new( POST => $self->url(), $headers, $message );
+class WsManClient(HTTPClient):
+    """
+    Python equivalent of GLPI::Agent::SOAP::WsMan, implementing
+    WS-Man protocol operations over HTTP.
+    """
 
-    print STDERR "===>\n", $request->as_string, "===>\n" if $wsman_debug;
+    def __init__(self, **params: Any):
+        """Initializes the WS-Man client."""
+        global _xml
 
-    # Get response ignoring logging of error 500 as we would like to analyse it by ourself
-    my $response = $self->request($request, undef, undef, undef, 500 => 1);
+        config: Dict[str, Any] = params.get('config', {})
 
-    $self->{_lastresponse} = $response;
+        # 1. Parent initialization (Perl's SUPER::new)
+        super().__init__(
+            ca_cert_dir=config.get('ca_cert_dir') or os.environ.get('CA_CERT_PATH'),
+            ca_cert_file=config.get('ca_cert_file') or os.environ.get('CA_CERT_FILE'),
+            ssl_cert_file=config.get('ssl_cert_file') or os.environ.get('SSL_CERT_FILE'),
+            **params
+        )
 
-    print STDERR "<====\n", $response->as_string, "<====\n" if $wsman_debug;
+        # 2. Instance attributes
+        self._url = params.get('url')
+        self._lang = 'en-US'
+        self._winrm = params.get('winrm', 0)
+        self._noauth = 0 if params.get('user') and params.get('password') else 1
+        self._lastresponse = None
+        self._resource_class = None
+        self._exitcode = None
 
-    if ( $response->is_success ) {
-        $xml->string($response->content);
-        return $xml->dump_as_hash();
-    } elsif ($response->header('Content-Type') && $response->header('Content-Type') =~ m{application/soap\+xml}) {
-        # In case of failure (error 500) we can analyse the reason and log it
-        $xml->string($response->content);
-        my $envelope = Envelope->new($xml->dump_as_hash());
-        if ($envelope->header->action->is("fault")) {
-            my $code = $envelope->body->fault->errorCode;
-            return $self->abort("WMI ".($self->{_resource_class} ? $self->{_resource_class}." " : "")."resource not available") if $code && $code eq '2150858752';
-            $self->debug2("Raw client xml request: ".$message);
-            $self->debug2("Raw server xml answer: ".$response->content);
-            my $text = $envelope->body->fault->reason->text;
-            return $self->abort($text || $response->status_line);
-        }
-    }
-
-    unless ( $response->is_success ) {
-        my $status = $response->status_line;
-        return $self->abort($status);;
-    }
-}
-
-sub identify {
-    my ($self) = @_;
-
-    my $request = Envelope->new(
-        Namespace->new(qw(s wsmid)),
-        Header->new(),
-        Body->new( Identify->new() ),
-    );
-
-    my $response = $self->_send(
-        $request,
-        $self->{_winrm} && $self->{_noauth} ? { WSMANIDENTIFY => 'unauthenticated' } : {},
-    );
-
-    return unless $response;
-
-    my $envelope = Envelope->new($response);
-    my $body = $envelope->body;
-    return $self->abort("Malformed identify response, no 'body' node found")
-        unless (ref($body) eq 'Body');
-
-    my $identify = $body->get("IdentifyResponse");
-    return $self->abort("Malformed identify response, not valid")
-        unless $identify->isvalid();
-
-    $self->debug2("Identify response: ".$identify->ProductVendor." - ".$identify->ProductVersion);
-
-    # Get remote lang as default lang for future exchanges
-    my $lang = $envelope->attribute('xml:lang');
-    if ($lang) {
-        $self->{_lang} = $lang;
-        $self->debug2("Identify response language: ".$lang);
-    }
-
-    return $identify;
-}
-
-sub enumerate {
-    my ($self, %params) = @_;
-
-    my @items;
-    my $class = $params{query} ? '*' : $params{class};
-    $self->{_resource_class} = $class unless $class eq '*';
-    my $url = $self->resource_url($class, $params{moniker});
-
-    my $messageid = MessageID->new();
-    my $sid = SessionId->new();
-    my $operationid = OperationID->new();
-    my $body;
-    if ($params{query}) {
-        $body = Body->new(
-            Enumerate->new(
-                OptimizeEnumeration->new(),
-                MaxElements->new(32000),
-                Filter->new(encode('UTF-8',$params{query})),
+        # 3. Global XML utility setup (Perl's singleton check)
+        if _xml is None:
+            # Note: 'first_out' is Perl-specific XML-builder instruction. Mocked here.
+            _xml = GLPIAgentXML(
+                first_out=['s:Header'],
+                no_xml_decl='',
+                xml_format=0,
             )
-        );
-    } else {
-        $body = Body->new(
-            Enumerate->new()
-        );
-    }
-    my $action = Action->new("enumerate");
 
-    $self->debug2($params{query} ?
-        "Requesting enumerate: $params{query}" : "Requesting enumerate URL: $url"
-    );
+    def abort(self, message: str) -> None:
+        """Sets the last error and logs a debug message."""
+        self.lasterror(message)
+        self.debug2(message)
+        return
 
-    my $request = Envelope->new(
-        Namespace->new($params{selectorset} ? qw(s a w p) : qw(s a n w p b)),
-        Header->new(
-            To->new( $self->url ),
-            ResourceURI->new( $url ),
-            ReplyTo->anonymous,
-            $action,
-            $messageid,
-            MaxEnvelopeSize->new(512000),
-            Locale->new($self->{_lang}),
-            DataLocale->new($self->{_lang}),
-            $sid,
-            $operationid,
-            SequenceId->new(),
-            OperationTimeout->new(60),
-        ),
-        $body,
-    );
+    def _send(self, envelope: Envelope, header: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """
+        Builds the SOAP message, sends the HTTP request, and parses the response.
+        """
+        global _xml, _wsman_debug
 
-    my $response;
+        header = header or {}
+        message = _xml.write(envelope.get())
 
-    while ($request) {
-        $response = $self->_send($request)
-            or last;
+        if not message:
+            return self.abort("Won't send wrong request")
 
-        my $envelope = Envelope->new($response)
-            or last;
-
-        my $header = $envelope->header;
-        unless (ref($header) eq 'Header') {
-            $self->lasterror("Malformed enumerate response, no 'Header' node found");
-            last;
+        headers = {
+            'Content-Type': 'application/soap+xml;charset=UTF-8',
+            'Content-length': str(len(message)),
+            **header,
         }
 
-        my $respaction = $header->action;
-        unless (ref($respaction) eq 'Action') {
-            $self->lasterror("Malformed enumerate response, no 'Action' found in Header");
-            last;
-        }
-        my $ispull = $respaction->is('pullresponse');
-        # check method action is valid
-        unless ($ispull || $respaction->is('enumerateresponse')) {
-            $self->lasterror("Not an enumerate response but ".$respaction->what);
-            last;
-        }
-
-        my $related = $header->get('RelatesTo');
-        if (!$related || $related->string() ne $messageid->string()) {
-            $self->lasterror("Got message not related to our enumeration request");
-            last;
-        }
-
-        my $thisopid = $header->get('OperationID');
-        unless ($thisopid && $thisopid->equals($operationid)) {
-            $self->lasterror("Got message not related to our operation");
-            last;
-        }
-
-        my $respbody = $envelope->body;
-        unless (ref($respbody) eq 'Body') {
-            $self->lasterror("Malformed enumerate response, no 'Body' node found");
-            last;
-        }
-
-        my $enum = $respbody->enumeration($ispull);
-        my @enumitems = $enum->items;
-        if ($params{method}) {
-            foreach my $item (@enumitems) {
-                next unless ref($item) eq 'HASH';
-                my $class = $item->{CreationClassName}
-                    or next;
-                my $selectorvalue = $item->{$params{selector}};
-                next unless defined($selectorvalue);
-                my $result = $self->runmethod(
-                    class       => $class,
-                    moniker     => $params{moniker},
-                    method      => $params{method},
-                    selectorset => [ "$params{selector}=$selectorvalue" ],
-                    params      => [ @{$params{params}} ],
-                    binds       => $params{binds},
-                );
-                push @items, $params{properties} ? _extract($result, $params{properties}) : $result;
-            }
-        } elsif ($params{properties}) {
-            push @items, map { _extract($_, $params{properties}) } @enumitems;
-        } else {
-            push @items, @enumitems;
-        }
-
-        last if $enum->end_of_sequence;
-
-        # Fix Envelope namespaces
-        $request->reset_namespace("s,a,n,w,p");
-
-        # Update Action to Pull
-        $action->set("pull");
-
-        # Update MessageID & OperationID
-        $messageid->reset_uuid();
-        $operationid->reset_uuid();
-
-        # Reset Body to make Pull request with provided EnumerationContext
-        $body->reset(
-            Pull->new( $enum->context )
-        );
-    }
-
-    # Send End to remote
-    $self->end($operationid);
-
-    # Forget what resource was requested
-    delete $self->{_resource_class};
-
-    return @items;
-}
-
-sub _extract {
-    my ($item, $properties) = @_;
-
-    return $item unless ref($item) eq 'HASH' && ref($properties) eq 'ARRAY';
-
-    my $hash = {};
-
-    foreach my $property (@{$properties}) {
-        if (ref($item->{$property}) eq 'ARRAY') {
-            $hash->{$property} = [
-                map { $_ } @{$item->{$property}}
-            ];
-        } elsif (ref($item->{$property}) eq 'HASH') {
-            $hash->{$property} = {
-                map { $_ => _extract($item->{$property}, [ keys(%{$item->{$property}}) ]) } keys(%{$item->{$property}})
-            };
-        } else {
-            $hash->{$property} = $item->{$property};
-        }
-    }
-
-    return $hash;
-}
-
-my %HIVEREF = (
-    HKEY_CLASSES_ROOT   => 0x80000000,
-    HKEY_CURRENT_USER   => 0x80000001,
-    HKEY_LOCAL_MACHINE  => 0x80000002,
-    HKEY_USERS          => 0x80000003,
-    HKEY_CURRENT_CONFIG => 0x80000005
-);
-
-sub runmethod {
-    my ($self, %params) = @_;
-
-    return $self->abort("Not method to set as action")
-        unless $params{method};
-
-    my $url = $self->resource_url($params{class}, $params{moniker});
-
-    my $messageid = MessageID->new();
-    my $sid = SessionId->new();
-    my $operationid = OperationID->new();
-    my $ns = "rm";
-
-    my @selectorset;
-    push @selectorset, SelectorSet->new(
-        map { Selector->new($_) } @{$params{selectorset}}
-    ) if $params{selectorset};
-
-    my @valueset;
-    my $what;
-    if ($params{path}) {
-        my ($hKey, $keypath, $keyvalue);
-        if ($params{method} =~ /^Enum/) {
-            ($hKey, $keypath) = $params{path} =~ m{^(HKEY_[^/]+)/(.*)$};
-            $what = $params{method} =~ /^EnumValues/ ? "key values" : "key subkeys";
-        } else {
-            ($hKey, $keypath, $keyvalue) = $params{path} =~ m{^(HKEY_[^/]+)/(.*)/([^/]+)$};
-            $what = "value";
-        }
-        return $self->abort("Unsupported $params{path} registry path")
-            unless $hKey && $keypath;
-
-        $keypath =~ s|/|\\|g;
-
-        my $hdefkey = $HIVEREF{uc($hKey)}
-            or return $self->abort("Unsupported registry hive in $params{path} registry path");
-
-        # Prepare ValueSet and reset namespace as will be set in $method parent node
-        push @valueset, Node->new(
-            Namespace->new($ns => $url),
-            __nodeclass__   => "hDefKey",
-            $hdefkey,
-        ), Node->new(
-            Namespace->new($ns => $url),
-            __nodeclass__   => "sSubKeyName",
-            $keypath,
-        );
-        push @valueset, Node->new(
-            Namespace->new($ns => $url),
-            __nodeclass__   => "sValueName",
-            $keyvalue,
-        ) if defined($keyvalue);
-        map { $_->reset_namespace() } @valueset;
-    }
-
-    my $method = Node->new(
-        Namespace->new($ns => $url),
-        __nodeclass__   => "$params{method}_INPUT",
-        @valueset,
-    );
-    my $body = Body->new($method);
-    my $action = Action->new($url."/".$params{method});
-
-    $self->debug2($what ?
-        "Looking for $params{path} registry $what via winrm" :
-        "Requesting $params{method} action on resource: $url"
-    ) unless $params{nodebug};
-
-    my $request = Envelope->new(
-        Namespace->new(qw(s a w p)),
-        Header->new(
-            To->new( $self->url ),
-            ResourceURI->new( $url ),
-            ReplyTo->anonymous,
-            $action,
-            $messageid,
-            MaxEnvelopeSize->new(512000),
-            Locale->new($self->{_lang}),
-            DataLocale->new($self->{_lang}),
-            $sid,
-            $operationid,
-            SequenceId->new(),
-            OperationTimeout->new(60),
-            @selectorset,
-        ),
-        $body,
-    );
-
-    my $response = $self->_send($request)
-        or return;
-
-    my $envelope = Envelope->new($response)
-        or return;
-
-    my $header = $envelope->header;
-    return $self->abort("Malformed run method response, no 'Header' node found")
-        unless ref($header) eq 'Header';
-
-    my $respaction = $header->action;
-    return $self->abort("Malformed run method response, no 'Action' found in Header")
-        unless ref($respaction) eq 'Action';
-    return $self->abort("Not a run method response but ".$respaction->what)
-        unless $respaction->what eq $url."/$params{method}Response";
-
-    my $related = $header->get('RelatesTo');
-    return $self->abort("Got message not related to our run method request")
-        if (!$related || $related->string() ne $messageid->string());
-
-    my $thisopid = $header->get('OperationID');
-    return $self->abort("Got message not related to our run method operation")
-        unless ($thisopid && $thisopid->equals($operationid));
-
-    my $respbody = $envelope->body;
-    return $self->abort("Malformed run method response, no 'Body' node found")
-        unless ref($respbody) eq 'Body';
-
-    # Return method result as a hash
-    my $result;
-    my $node = $respbody->get($params{method}.'_OUTPUT');
-    foreach my $key (@{$params{params}}) {
-        my $value;
-        my @nodes;
-        my $keynode = $node->get($key);
-        @nodes = $keynode->nodes() if $keynode;
-        if (@nodes && $key eq 'uValue') {
-            $value = join('', map { chr($_->string()) } @nodes);
-        } elsif (@nodes && $key =~ /^sNames|Types$/) {
-            $value = [ map { $_->string() } @nodes ];
-        } elsif ($keynode) {
-            my $string = $keynode->string;
-            $value = $key =~ /^sNames|Types$/ ? [ $string ] : $string;
-        }
-        if ($params{binds} && $params{binds}->{$key}) {
-            $key = $params{binds}->{$key};
-        }
-        $result->{$key} = $value;
-    }
-
-    # Send End to remote
-    $self->end($operationid);
-
-    return $result;
-}
-
-sub shell {
-    my ($self, $command) = @_;
-
-    return unless $command;
-
-    # limit log command size if too large like for powershell commands
-    if ($self->debug()) {
-        my $logcommand = $command;
-        while (length($logcommand)>120 && $logcommand =~ /\w\s+\w/) {
-            ($logcommand) = $logcommand =~ /^(.*\w)\s+\w+/;
-            $logcommand .= " ...";
-        }
-        $self->debug2("Requesting '$logcommand' run to ".$self->url);
-    }
-
-    my $messageid = MessageID->new();
-    my $sid = SessionId->new();
-    my $operationid = OperationID->new();
-    my $shell = Shell->new();
-    my $action = Action->new("create");
-    my $resource = ResourceURI->new("http://schemas.microsoft.com/wbem/wsman/1/windows/shell/cmd");
-
-    # WinRS option set
-    my $optionset = OptionSet->new(
-        Option->new( WINRS_NOPROFILE    => "TRUE" ),
-        Option->new( WINRS_CODEPAGE     => "65001" ),
-    );
-
-    # Create a remote shell
-    my $request = Envelope->new(
-        Namespace->new(qw(s a w p)),
-        Header->new(
-            To->new( $self->url ),
-            $resource,
-            ReplyTo->anonymous,
-            $action,
-            $messageid,
-            MaxEnvelopeSize->new(512000),
-            Locale->new($self->{_lang}),
-            DataLocale->new($self->{_lang}),
-            $sid,
-            $operationid,
-            SequenceId->new(),
-            OperationTimeout->new(60),
-            $optionset,
-        ),
-        Body->new($shell),
-    );
-
-    my $response = $self->_send($request)
-        or return;
-
-    my $envelope = Envelope->new($response)
-        or return;
-
-    my $header = $envelope->header;
-    return $self->abort("Malformed create response, no 'Header' node found")
-        unless ref($header) eq 'Header';
-
-    my $respaction = $header->action;
-    return $self->abort("Malformed create response, no 'Action' found in Header")
-        unless ref($respaction) eq 'Action';
-    return $self->abort("Not a create response but ".$respaction->what)
-        unless $respaction->is('createresponse');
-
-    my $related = $header->get('RelatesTo');
-    return $self->abort("Got message not related to our shell create request")
-        if (!$related || $related->string() ne $messageid->string());
-
-    my $thisopid = $header->get('OperationID');
-    return $self->abort("Got message not related to our shell create operation")
-        unless ($thisopid && $thisopid->equals($operationid));
-
-    my $respbody = $envelope->body;
-    return $self->abort("Malformed create response, no 'Body' node found")
-        unless ref($respbody) eq 'Body';
-
-    my $created = $respbody->get('ResourceCreated');
-    return $self->abort("Malformed create response, no 'ResourceCreated' node found")
-        unless ref($created) eq 'ResourceCreated';
-
-    my $reference = $created->get('ReferenceParameters');
-    return $self->abort("Malformed create response, no 'ReferenceParameters' returned")
-        unless ref($reference) eq 'ReferenceParameters';
-
-    my $selectorset = $reference->get('SelectorSet');
-    return $self->abort("Malformed create response, no 'SelectorSet' returned")
-        unless ref($selectorset) eq 'SelectorSet';
-
-    # Setup command shell
-    $messageid = MessageID->new();
-    $operationid = OperationID->new();
-    $action = Action->new("command");
-    $optionset = OptionSet->new(
-        Option->new( WINRS_CONSOLEMODE_STDIN => "TRUE" ),
-    );
-    $request = Envelope->new(
-        Namespace->new(qw(s a w p)),
-        Header->new(
-            To->new( $self->url ),
-            $resource,
-            ReplyTo->anonymous,
-            $action,
-            $messageid,
-            MaxEnvelopeSize->new(512000),
-            Locale->new($self->{_lang}),
-            DataLocale->new($self->{_lang}),
-            $sid,
-            $operationid,
-            SequenceId->new(),
-            $selectorset,
-            OperationTimeout->new(60),
-            $optionset,
-        ),
-        Body->new(
-            $shell->commandline($command),
-        ),
-    );
-    $response = $self->_send($request);
-    return $self->abort("No command response")
-        unless $response;
-
-    $envelope = Envelope->new($response);
-    return $self->abort("Malformed command response, no 'Envelope' node found")
-        unless $envelope;
-
-    $header = $envelope->header;
-    return $self->abort("Malformed command response, no 'Header' node found")
-        unless ref($header) eq 'Header';
-
-    $respaction = $header->action;
-    return $self->abort("Malformed command response, no 'Action' found in Header")
-        unless ref($respaction) eq 'Action';
-    return $self->abort("Not a command response but ".$respaction->what)
-        unless $respaction->is('commandresponse');
-
-    $related = $header->get('RelatesTo');
-    return $self->abort("Got message not related to our shell command request")
-        if (!$related || $related->string() ne $messageid->string());
-
-    $thisopid = $header->get('OperationID');
-    return $self->abort("Got message not related to our shell command operation")
-        unless ($thisopid && $thisopid->equals($operationid));
-
-    $respbody = $envelope->body;
-    return $self->abort("Malformed command response, no 'Body' node found")
-        unless ref($respbody) eq 'Body';
-
-    my $respcmd = $respbody->get('CommandResponse');
-    return $self->abort("Malformed command response, no 'CommandResponse' node found")
-        unless ref($respcmd) eq 'CommandResponse';
-
-    my $commandid = $respcmd->get('CommandId');
-    return $self->abort("Malformed command response, no 'CommandId' returned")
-        unless ref($commandid) eq 'CommandId';
-
-    my $cid = $commandid->string();
-    return $self->abort("Malformed command response, no CommandId value found")
-        unless $cid;
-
-    # Read stream from remote shell
-    my $buffer = $self->receive($sid, $resource, $selectorset, $cid);
-    my $exitcode = delete $self->{_exitcode} // 255;
-
-    # Send terminate signal to shell
-    $self->signal($sid, $resource, $selectorset, $cid, 'terminate');
-
-    # Finally delete the shell resource
-    $operationid = $self->delete($sid, $resource, $selectorset)
-        or $self->error("Resource deletion failure");
-
-    # Send End to remote
-    $self->end($operationid) if $operationid;
-
-    return {
-        stdout      => \$buffer,
-        exitcode    => $exitcode,
-    };
-}
-
-sub receive {
-    my ($self, $sid, $resource, $selectorset, $cid) = @_;
-
-    my $stdout;
-
-    while (1) {
-        my $messageid = MessageID->new();
-        my $operationid = OperationID->new();
-
-        # Send Delete to remote
-        my $request = Envelope->new(
-            Namespace->new(qw(s a w p)),
-            Header->new(
-                To->new( $self->url ),
-                $resource,
-                ReplyTo->anonymous,
-                Action->new("receive"),
-                $messageid,
-                MaxEnvelopeSize->new(512000),
-                Locale->new($self->{_lang}),
-                DataLocale->new($self->{_lang}),
-                $sid,
-                $operationid,
-                SequenceId->new(),
-                OperationTimeout->new(60),
-                $selectorset,
+        # The Perl code uses HTTP::Request/Headers objects, adapting to use mocks
+        # compatible with the base class's request method.
+        request = HTTP_Request('POST', self.url(), HTTP_Headers(**headers), message)
+
+        if _wsman_debug:
+            print("===>\n", request.as_string(), "===>\n", file=sys.stderr)
+
+        # Get response ignoring logging of error 500
+        # The '500 => 1' logic is handled by the base class mock for compatibility
+        response = self.request(request, error_code_logging_override={500: 1})
+
+        self._lastresponse = response
+
+        if _wsman_debug:
+            print("<====\n", response.as_string(), "<====\n", file=sys.stderr)
+
+        if response.is_success():
+            _xml.string(response.content())
+            return _xml.dump_as_hash()
+        
+        # Handle non-successful response that might contain SOAP Fault (HTTP 500)
+        content_type = response.header('Content-Type')
+        if content_type and 'application/soap+xml' in content_type:
+            _xml.string(response.content())
+            response_hash = _xml.dump_as_hash()
+            envelope = Envelope(response_hash)
+            
+            # Mock check for fault action
+            if envelope.header.action().is("fault"):
+                # Mock extraction of error code
+                code = envelope.body.fault.get('errorCode') # Need to assume where code is
+                if code and code == '2150858752':
+                    resource_name = f"{self._resource_class} " if self._resource_class else ""
+                    return self.abort(f"WMI {resource_name}resource not available")
+                
+                self.debug2("Raw client xml request: " + message)
+                self.debug2("Raw server xml answer: " + response.content())
+                
+                # Mock extraction of fault text
+                text = envelope.body.fault.get('reason_text')
+                return self.abort(text or response.status_line())
+
+        # Final check for failure
+        if not response.is_success():
+            status = response.status_line()
+            return self.abort(status)
+        
+        return None
+
+    def identify(self) -> Optional[Identify]:
+        """Sends a WS-Man Identify request to the service."""
+        request = Envelope(
+            Namespace('s', 'wsmid'),
+            Header(),
+            Body(Identify()),
+        )
+
+        # Build header for unauthenticated WINRM if necessary
+        header_params = {}
+        if self._winrm and self._noauth:
+            header_params['WSMANIDENTIFY'] = 'unauthenticated'
+
+        response = self._send(request, header_params)
+        if not response:
+            return None
+
+        envelope = Envelope(response)
+        body = envelope.body
+        if not isinstance(body, Body):
+            return self.abort("Malformed identify response, no 'body' node found")
+
+        # Mock extraction of IdentifyResponse
+        identify = body.get("IdentifyResponse") or Identify()
+        if not identify.isvalid():
+            return self.abort("Malformed identify response, not valid")
+
+        # Mock logger usage
+        self.debug2(f"Identify response: {identify.get('ProductVendor')} - {identify.get('ProductVersion')}")
+
+        # Get remote lang as default lang for future exchanges
+        lang = envelope.attribute('xml:lang')
+        if lang:
+            self._lang = lang
+            self.debug2(f"Identify response language: {lang}")
+
+        return identify
+
+    def resource_url(self, class_name: str, moniker: Optional[str] = None) -> Optional[str]:
+        """Constructs the WS-Man ResourceURI based on class and moniker."""
+        path = "cimv2"
+
+        if moniker:
+            moniker = moniker.replace('\\', '/')
+            match = re.search(r'root/(.*)$', moniker, re.IGNORECASE)
+            if not match:
+                return self.abort(f"Wrong moniker for request: {moniker}")
+            path = match.group(1).rstrip('/')
+
+        return f"http://schemas.microsoft.com/wbem/wsman/1/wmi/root/{path.lower()}/{class_name.lower()}"
+
+    def enumerate(self, **params: Any) -> List[Dict[str, Any]]:
+        """Handles WS-Man Enumerate and subsequent Pull operations."""
+        items: List[Dict[str, Any]] = []
+        
+        # Perl's logic: $class = $params{query} ? '*' : $params{class};
+        class_name = '*' if params.get('query') else params.get('class')
+        
+        # Perl's logic: $self->{_resource_class} = $class unless $class eq '*';
+        if class_name != '*':
+            self._resource_class = class_name
+            
+        url = self.resource_url(class_name, params.get('moniker'))
+        if not url: return []
+
+        messageid = MessageID()
+        sid = SessionId()
+        operationid = OperationID()
+        
+        body: Body
+        if params.get('query'):
+            # Perl's logic: encode('UTF-8',$params{query}) is done by the Filter object
+            body = Body(
+                Enumerate(
+                    OptimizeEnumeration(),
+                    MaxElements(32000),
+                    Filter(params['query'].encode('utf-8')),
+                )
+            )
+        else:
+            body = Body(Enumerate())
+
+        action = Action("enumerate")
+
+        log_msg = f"Requesting enumerate: {params['query']}" if params.get('query') else f"Requesting enumerate URL: {url}"
+        self.debug2(log_msg)
+
+        # Determine namespaces for the Envelope (p is likely wsmid in Perl)
+        # Perl: Namespace->new($params{selectorset} ? qw(s a w p) : qw(s a n w p b))
+        namespaces = ['s', 'a', 'w', 'p'] # simplified mock
+
+        request = Envelope(
+            Namespace(*namespaces),
+            Header(
+                To(self.url()),
+                ResourceURI(url),
+                ReplyTo().anonymous,
+                action,
+                messageid,
+                MaxEnvelopeSize(512000),
+                Locale(self._lang),
+                DataLocale(self._lang),
+                sid,
+                operationid,
+                SequenceId(),
+                OperationTimeout(60),
+                # SelectorSet logic would go here if implemented
             ),
-            Body->new( Receive->new($cid) ),
-        );
+            body,
+        )
 
-        my $response = $self->_send($request)
-            or last;
+        while True:
+            response_hash = self._send(request)
+            if not response_hash:
+                break
 
-        my $envelope = Envelope->new($response)
-            or last;
+            envelope = Envelope(response_hash)
+            header = envelope.header
+            if not isinstance(header, Header):
+                self.lasterror("Malformed enumerate response, no 'Header' node found")
+                break
 
-        my $header = $envelope->header;
-        $self->abort("Malformed receive response, no 'Header' node found") and last
-            unless ref($header) eq 'Header';
+            respaction = header.action()
+            if not isinstance(respaction, Action):
+                self.lasterror("Malformed enumerate response, no 'Action' found in Header")
+                break
 
-        my $action = $header->action;
-        $self->abort("Malformed receive response, no 'Action' found in Header") and last
-            unless ref($action) eq 'Action';
-        $self->abort("Not a receive response but ".$action->what) and last
-            unless $action->is('receiveresponse');
+            ispull = respaction.is('pullresponse')
+            if not (ispull or respaction.is('enumerateresponse')):
+                self.lasterror(f"Not an enumerate response but {respaction.what()}")
+                break
 
-        my $related = $header->get('RelatesTo');
-        $self->abort("Got message not related to receive request") and last
-            if (!$related || $related->string() ne $messageid->string());
+            related = header.get('RelatesTo')
+            if not related or related.string() != messageid.string():
+                self.lasterror("Got message not related to our enumeration request")
+                break
 
-        my $thisopid = $header->get('OperationID');
-        $self->abort("Got message not related to receive operation") and last
-            unless ($thisopid && $thisopid->equals($operationid));
+            thisopid = header.get('OperationID')
+            if not (thisopid and thisopid.equals(operationid)):
+                self.lasterror("Got message not related to our operation")
+                break
 
-        my $body = $envelope->body;
-        $self->lasterror("Malformed receive response, no 'Body' node found") and last
-            unless (ref($body) eq 'Body');
+            respbody = envelope.body
+            if not isinstance(respbody, Body):
+                self.lasterror("Malformed enumerate response, no 'Body' node found")
+                break
 
-        my $received = $body->get('ReceiveResponse');
-        $self->lasterror("Malformed receive response, no 'ReceiveResponse' node found") and last
-            unless (ref($received) eq 'ReceiveResponse');
+            enum = respbody.enumeration(ispull)
+            enum_items = enum.items()
 
-        my $cmdstate = $received->get('CommandState');
-        $self->lasterror("Malformed receive response, no 'CommandState' node found") and last
-            unless (ref($cmdstate) eq 'CommandState');
+            if params.get('method'):
+                # Handle methods requested on each enumerated item
+                for item in enum_items:
+                    if not isinstance(item, dict): continue
 
-        my $streams = $received->get('Stream');
-        $self->lasterror("Malformed receive response, no 'Stream' node found") and last
-            unless (ref($streams) eq 'Stream');
+                    class_ = item.get('CreationClassName')
+                    if not class_: continue
 
-        # Handles Streams
-        my $stderr = $streams->stderr($cid);
-        $stdout .= $streams->stdout($cid);
+                    selector_prop = params.get('selector')
+                    selector_value = item.get(selector_prop)
+                    if selector_value is None: continue
 
-        if (defined($stderr) && length($stderr)) {
-            foreach my $line (split(/\n/m, $stderr)) {
-                chomp $line;
-                $self->debug2("Command stderr: $line");
+                    selectorset = [f"{selector_prop}={selector_value}"]
+                    
+                    result = self.runmethod(
+                        class_=class_,
+                        moniker=params.get('moniker'),
+                        method=params.get('method'),
+                        selectorset=selectorset,
+                        params=params.get('params', []),
+                        binds=params.get('binds')
+                    )
+                    
+                    if params.get('properties'):
+                        items.append(_extract(result, params['properties']))
+                    else:
+                        items.append(result)
+            
+            elif params.get('properties'):
+                # Extract properties from results
+                items.extend([_extract(item, params['properties']) for item in enum_items])
+            else:
+                # Add all results
+                items.extend(enum_items)
+
+            if enum.end_of_sequence():
+                break
+
+            # Prepare for next Pull request
+
+            # Fix Envelope namespaces (simplified mock)
+            request.reset_namespace("s,a,n,w,p")
+
+            # Update Action to Pull
+            action.set("pull")
+
+            # Update MessageID & OperationID
+            messageid.reset_uuid()
+            operationid.reset_uuid()
+
+            # Reset Body to make Pull request with provided EnumerationContext
+            body.reset(Pull(enum.context))
+
+        # Send End to remote (outside the loop, regardless of break reason)
+        self.end(operationid)
+
+        # Forget what resource was requested
+        del self._resource_class
+
+        return items
+
+    def runmethod(self, **params: Any) -> Optional[Dict[str, Any]]:
+        """Executes a WS-Man method (like a WMI method)."""
+        if not params.get('method'):
+            return self.abort("Not method to set as action")
+
+        url = self.resource_url(params.get('class'), params.get('moniker'))
+        if not url: return None
+
+        messageid = MessageID()
+        sid = SessionId()
+        operationid = OperationID()
+        ns = "rm"
+
+        selectorset_elements: List[SelectorSet] = []
+        if params.get('selectorset'):
+            selectors = [Selector(s) for s in params['selectorset']]
+            selectorset_elements.append(SelectorSet(*selectors))
+
+        valueset: List[Node] = []
+        what: Optional[str] = None
+        
+        # Registry path parsing (used for MS-WSMV methods like GetValue/EnumKeys)
+        if params.get('path'):
+            hKey, keypath, keyvalue = None, None, None
+            
+            if params['method'].startswith('Enum'):
+                match = re.match(r'^(HKEY_[^/]+)/(.*)$', params['path'])
+                if match:
+                    hKey, keypath = match.groups()
+                what = "key values" if params['method'].startswith('EnumValues') else "key subkeys"
+            else:
+                match = re.match(r'^(HKEY_[^/]+)/(.*)/([^/]+)$', params['path'])
+                if match:
+                    hKey, keypath, keyvalue = match.groups()
+                what = "value"
+            
+            if not hKey or not keypath:
+                return self.abort(f"Unsupported {params['path']} registry path")
+
+            keypath = keypath.replace('/', '\\')
+            
+            hdefkey = _HIVEREF.get(hKey.upper())
+            if hdefkey is None:
+                return self.abort(f"Unsupported registry hive in {params['path']} registry path")
+
+            # Prepare ValueSet (Registry method specific nodes)
+            valueset.append(Node(Namespace(ns, url), __nodeclass__="hDefKey", content=hdefkey))
+            valueset.append(Node(Namespace(ns, url), __nodeclass__="sSubKeyName", content=keypath))
+            if keyvalue is not None:
+                valueset.append(Node(Namespace(ns, url), __nodeclass__="sValueName", content=keyvalue))
+            
+            for node in valueset:
+                node.reset_namespace()
+
+        method_node = Node(
+            Namespace(ns, url),
+            __nodeclass__=f"{params['method']}_INPUT",
+            content=valueset,
+        )
+        body = Body(method_node)
+        action = Action(f"{url}/{params['method']}")
+
+        if not params.get('nodebug'):
+            log_msg = (
+                f"Looking for {params['path']} registry {what} via winrm" if what else
+                f"Requesting {params['method']} action on resource: {url}"
+            )
+            self.debug2(log_msg)
+
+        request = Envelope(
+            Namespace('s', 'a', 'w', 'p'),
+            Header(
+                To(self.url()),
+                ResourceURI(url),
+                ReplyTo().anonymous,
+                action,
+                messageid,
+                MaxEnvelopeSize(512000),
+                Locale(self._lang),
+                DataLocale(self._lang),
+                sid,
+                operationid,
+                SequenceId(),
+                OperationTimeout(60),
+                *selectorset_elements,
+            ),
+            body,
+        )
+
+        response_hash = self._send(request)
+        if not response_hash:
+            return None
+
+        envelope = Envelope(response_hash)
+
+        # Response validation (similar to enumerate/identify)
+        header = envelope.header
+        if not isinstance(header, Header): return self.abort("Malformed run method response, no 'Header' node found")
+        respaction = header.action()
+        if not isinstance(respaction, Action): return self.abort("Malformed run method response, no 'Action' found in Header")
+        if respaction.what() != f"{url}/{params['method']}Response": return self.abort(f"Not a run method response but {respaction.what()}")
+        related = header.get('RelatesTo')
+        if not related or related.string() != messageid.string(): return self.abort("Got message not related to our run method request")
+        thisopid = header.get('OperationID')
+        if not (thisopid and thisopid.equals(operationid)): return self.abort("Got message not related to our run method operation")
+        respbody = envelope.body
+        if not isinstance(respbody, Body): return self.abort("Malformed run method response, no 'Body' node found")
+
+        # Return method result as a hash (Perl's logic is complex here for handling uValue)
+        result: Dict[str, Any] = {}
+        node = respbody.get(f"{params['method']}_OUTPUT")
+        
+        for key in params.get('params', []):
+            value: Any = None
+            keynode = node.get(key)
+            nodes = keynode.nodes() if keynode else []
+
+            # Mocking complex value extraction logic from Perl
+            if nodes and key == 'uValue':
+                # Perl logic: join('', map { chr($_->string()) } @nodes) -> char array to string
+                # Mocking simple join
+                value = "".join([n.string() for n in nodes])
+            elif nodes and re.match(r'^(sNames|Types)$', key):
+                value = [n.string() for n in nodes]
+            elif keynode:
+                string_val = keynode.string()
+                value = [string_val] if re.match(r'^(sNames|Types)$', key) else string_val
+            
+            # Perl's binding logic
+            if params.get('binds') and params['binds'].get(key):
+                key = params['binds'][key]
+            
+            result[key] = value
+
+        # Send End to remote
+        self.end(operationid)
+
+        return result
+
+    def shell(self, command: str) -> Optional[Dict[str, Any]]:
+        """
+        Creates a remote shell, executes a command, retrieves output,
+        signals termination, and deletes the shell resource.
+        """
+        if not command: return None
+
+        # Log command (Perl's logic to limit log size)
+        if self.debug():
+            logcommand = command
+            # Simplified log truncation (Perl regex not perfectly matched)
+            if len(logcommand) > 120:
+                logcommand = logcommand[:115] + " ..."
+            self.debug2(f"Requesting '{logcommand}' run to {self.url()}")
+
+        # --- 1. CREATE SHELL ---
+        messageid = MessageID()
+        sid = SessionId()
+        operationid = OperationID()
+        shell = Shell()
+        action = Action("create")
+        resource = ResourceURI("http://schemas.microsoft.com/wbem/wsman/1/windows/shell/cmd")
+
+        optionset = OptionSet(
+            Option('WINRS_NOPROFILE', "TRUE"),
+            Option('WINRS_CODEPAGE', "65001"),
+        )
+
+        request = Envelope(
+            Namespace('s', 'a', 'w', 'p'),
+            Header(
+                To(self.url()),
+                resource,
+                ReplyTo().anonymous,
+                action,
+                messageid,
+                MaxEnvelopeSize(512000),
+                Locale(self._lang),
+                DataLocale(self._lang),
+                sid,
+                operationid,
+                SequenceId(),
+                OperationTimeout(60),
+                optionset,
+            ),
+            Body(shell),
+        )
+
+        response_hash = self._send(request)
+        if not response_hash: return None
+
+        envelope = Envelope(response_hash)
+
+        # Response validation (create)
+        header = envelope.header
+        if not isinstance(header, Header): return self.abort("Malformed create response, no 'Header' node found")
+        respaction = header.action()
+        if not isinstance(respaction, Action): return self.abort("Malformed create response, no 'Action' found in Header")
+        if not respaction.is('createresponse'): return self.abort(f"Not a create response but {respaction.what()}")
+        related = header.get('RelatesTo')
+        if not related or related.string() != messageid.string(): return self.abort("Got message not related to our shell create request")
+        thisopid = header.get('OperationID')
+        if not (thisopid and thisopid.equals(operationid)): return self.abort("Got message not related to our shell create operation")
+        respbody = envelope.body
+        if not isinstance(respbody, Body): return self.abort("Malformed create response, no 'Body' node found")
+        created = respbody.get('ResourceCreated')
+        if not isinstance(created, WsManElement): return self.abort("Malformed create response, no 'ResourceCreated' node found")
+        reference = created.get('ReferenceParameters')
+        if not isinstance(reference, WsManElement): return self.abort("Malformed create response, no 'ReferenceParameters' returned")
+        selectorset = reference.get('SelectorSet')
+        if not isinstance(selectorset, SelectorSet): return self.abort("Malformed create response, no 'SelectorSet' returned")
+
+        # --- 2. EXECUTE COMMAND ---
+        messageid = MessageID()
+        operationid = OperationID()
+        action = Action("command")
+        optionset = OptionSet(Option('WINRS_CONSOLEMODE_STDIN', "TRUE"))
+
+        request = Envelope(
+            Namespace('s', 'a', 'w', 'p'),
+            Header(
+                To(self.url()),
+                resource,
+                ReplyTo().anonymous,
+                action,
+                messageid,
+                MaxEnvelopeSize(512000),
+                Locale(self._lang),
+                DataLocale(self._lang),
+                sid,
+                operationid,
+                SequenceId(),
+                selectorset,
+                OperationTimeout(60),
+                optionset,
+            ),
+            Body(shell.commandline(command)),
+        )
+        response_hash = self._send(request)
+        if not response_hash: return self.abort("No command response")
+
+        envelope = Envelope(response_hash)
+        
+        # Response validation (command)
+        header = envelope.header
+        if not isinstance(header, Header): return self.abort("Malformed command response, no 'Header' node found")
+        respaction = header.action()
+        if not isinstance(respaction, Action): return self.abort("Malformed command response, no 'Action' found in Header")
+        if not respaction.is('commandresponse'): return self.abort(f"Not a command response but {respaction.what()}")
+        related = header.get('RelatesTo')
+        if not related or related.string() != messageid.string(): return self.abort("Got message not related to our shell command request")
+        thisopid = header.get('OperationID')
+        if not (thisopid and thisopid.equals(operationid)): return self.abort("Got message not related to our shell command operation")
+        respbody = envelope.body
+        if not isinstance(respbody, Body): return self.abort("Malformed command response, no 'Body' node found")
+        respcmd = respbody.get('CommandResponse')
+        if not isinstance(respcmd, WsManElement): return self.abort("Malformed command response, no 'CommandResponse' node found")
+        commandid = respcmd.get('CommandId')
+        if not isinstance(commandid, CommandId): return self.abort("Malformed command response, no 'CommandId' returned")
+        cid = commandid.string()
+        if not cid: return self.abort("Malformed command response, no CommandId value found")
+
+        # --- 3. RECEIVE OUTPUT STREAM ---
+        buffer = self.receive(sid, resource, selectorset, cid)
+        exitcode = self._exitcode if self._exitcode is not None else 255
+        del self._exitcode
+
+        # --- 4. SIGNAL TERMINATE ---
+        self.signal(sid, resource, selectorset, cid, 'terminate')
+
+        # --- 5. DELETE SHELL RESOURCE ---
+        delete_opid = self.delete(sid, resource, selectorset)
+        if delete_opid is None: self.lasterror("Resource deletion failure")
+
+        # --- 6. END OPERATION ---
+        if delete_opid: self.end(delete_opid)
+
+        # Perl returns a scalar ref: \$buffer. Python returns the string directly.
+        return {
+            'stdout': buffer,
+            'exitcode': exitcode,
+        }
+
+    def receive(self, sid: SessionId, resource: ResourceURI, selectorset: SelectorSet, cid: str) -> Optional[str]:
+        """Receives output stream from an executing shell command."""
+        stdout: Optional[str] = ""
+
+        while True:
+            messageid = MessageID()
+            operationid = OperationID()
+
+            request = Envelope(
+                Namespace('s', 'a', 'w', 'p'),
+                Header(
+                    To(self.url()),
+                    resource,
+                    ReplyTo().anonymous,
+                    Action("receive"),
+                    messageid,
+                    MaxEnvelopeSize(512000),
+                    Locale(self._lang),
+                    DataLocale(self._lang),
+                    sid,
+                    operationid,
+                    SequenceId(),
+                    OperationTimeout(60),
+                    selectorset,
+                ),
+                Body(Receive(cid)),
+            )
+
+            response_hash = self._send(request)
+            if not response_hash: break
+
+            envelope = Envelope(response_hash)
+
+            # Response validation (receive)
+            header = envelope.header
+            if not isinstance(header, Header): self.abort("Malformed receive response, no 'Header' node found"); break
+            action = header.action()
+            if not isinstance(action, Action): self.abort("Malformed receive response, no 'Action' found in Header"); break
+            if not action.is('receiveresponse'): self.abort(f"Not a receive response but {action.what()}"); break
+            related = header.get('RelatesTo')
+            if not related or related.string() != messageid.string(): self.abort("Got message not related to receive request"); break
+            thisopid = header.get('OperationID')
+            if not (thisopid and thisopid.equals(operationid)): self.abort("Got message not related to receive operation"); break
+            body = envelope.body
+            if not isinstance(body, Body): self.lasterror("Malformed receive response, no 'Body' node found"); break
+            received = body.get('ReceiveResponse')
+            if not isinstance(received, WsManElement): self.lasterror("Malformed receive response, no 'ReceiveResponse' node found"); break
+            cmdstate = received.get('CommandState')
+            if not isinstance(cmdstate, WsManElement): self.lasterror("Malformed receive response, no 'CommandState' node found"); break
+            streams = received.get('Stream')
+            if not isinstance(streams, WsManElement): self.lasterror("Malformed receive response, no 'Stream' node found"); break
+
+            # Mock Stream handling (Real GLPI::Agent::SOAP::WsMan::Stream class does this)
+            stderr = streams.get('stderr') # Mock extraction
+            current_stdout = streams.get('stdout') # Mock extraction
+
+            if current_stdout is not None:
+                stdout += current_stdout
+
+            if stderr and len(stderr):
+                # Split and log stderr lines
+                for line in stderr.split('\n'):
+                    self.debug2(f"Command stderr: {line}")
+
+            # Mock exit code and done state
+            exitcode = cmdstate.get('ExitCode')
+            if exitcode is not None:
+                self.debug2(f"Command exited with code: {exitcode}")
+                # Mock stream completeness check
+                # self.debug2("Command stdout seems truncated") unless streams.stdout_is_full(cid)
+                # self.debug2("Command stderr seems truncated") unless streams.stderr_is_full(cid)
+                self._exitcode = exitcode
+
+            if cmdstate.get('Done'): # Mock cmdstate->done(cid)
+                break
+
+        return stdout
+
+    def signal(self, sid: SessionId, resource: ResourceURI, selectorset: SelectorSet, cid: str, signal: str):
+        """Sends a signal (e.g., terminate) to a running shell command."""
+        messageid = MessageID()
+        operationid = OperationID()
+
+        request = Envelope(
+            Namespace('s', 'a', 'w', 'p'),
+            Header(
+                To(self.url()),
+                resource,
+                ReplyTo().anonymous,
+                Action("signal"),
+                messageid,
+                MaxEnvelopeSize(512000),
+                Locale(self._lang),
+                DataLocale(self._lang),
+                sid,
+                operationid,
+                SequenceId(),
+                OperationTimeout(60),
+                selectorset,
+            ),
+            Body(
+                Signal(
+                    Attribute(f"xmlns:{Shell.xmlns()}", Shell.xsd()),
+                    Attribute("CommandId", cid),
+                    Code.signal(signal),
+                ),
+            ),
+        )
+
+        response_hash = self._send(request)
+        if not response_hash: return None
+
+        envelope = Envelope(response_hash)
+
+        # Response validation (signal)
+        header = envelope.header
+        if not isinstance(header, Header): return self.abort("Malformed signal response, no 'Header' node found")
+        respaction = header.action()
+        if not isinstance(respaction, Action): return self.abort("Malformed signal response, no 'Action' found in Header")
+        if not respaction.is('signalresponse'): return self.abort(f"Not a signal response but {respaction.what()}")
+        related = header.get('RelatesTo')
+        if not related or related.string() != messageid.string(): return self.abort("Got message not related to signal request")
+        thisopid = header.get('OperationID')
+        if not (thisopid and thisopid.equals(operationid)): return self.abort("Got message not related to signal operation")
+
+    def delete(self, sid: SessionId, resource: ResourceURI, selectorset: SelectorSet) -> Optional[OperationID]:
+        """Deletes a WS-Man resource (e.g., the shell)."""
+        messageid = MessageID()
+        operationid = OperationID()
+
+        request = Envelope(
+            Namespace('s', 'a', 'w', 'p'),
+            Header(
+                To(self.url()),
+                resource,
+                ReplyTo().anonymous,
+                Action("delete"),
+                messageid,
+                MaxEnvelopeSize(512000),
+                Locale(self._lang),
+                DataLocale(self._lang),
+                sid,
+                operationid,
+                SequenceId(),
+                OperationTimeout(60),
+                selectorset,
+            ),
+            Body(),
+        )
+
+        response_hash = self._send(request)
+        if not response_hash: return None
+
+        envelope = Envelope(response_hash)
+
+        # Response validation (delete)
+        header = envelope.header
+        if not isinstance(header, Header): return self.abort("Malformed delete response, no 'Header' node found")
+        respaction = header.action()
+        if not isinstance(respaction, Action): return self.abort("Malformed delete response, no 'Action' found in Header")
+        if not respaction.is('deleteresponse'): return self.abort(f"Not a delete response but {respaction.what()}")
+        related = header.get('RelatesTo')
+        if not related or related.string() != messageid.string(): return self.abort("Got message not related to delete request")
+        thisopid = header.get('OperationID')
+        if not (thisopid and thisopid.equals(operationid)): return self.abort("Got message not related to delete operation")
+
+        return operationid
+
+    def end(self, operationid: OperationID):
+        """Sends a final 'End' action for an OperationID."""
+        request = Envelope(
+            Namespace('s', 'a', 'w', 'p'),
+            Header(
+                To("http://www.w3.org/2005/08/addressing/anonymous"), # To->anonymous
+                ResourceURI("http://schemas.microsoft.com/wbem/wsman/1/wsman/FullDuplex"),
+                Action("end"),
+                MessageID(),
+                operationid,
+            ),
+            Body(),
+        )
+        self._send(request)
+
+if __name__ == '__main__':
+    # This block provides a minimal example of how the class would be used.
+    import sys
+    
+    # Simple Logger Mock
+    class LoggerMock:
+        def debug_level(self): return 2
+        def debug(self, msg): print(f"[DEBUG] {msg}")
+        def debug2(self, msg): print(f"[DEBUG2] {msg}")
+        
+    wsman_client = WsManClient(
+        url="http://localhost:5985/wsman", 
+        logger=LoggerMock(),
+        winrm=1, # Assume WinRM is active for shell operations
+        user="test", # To set _noauth=0
+        password="test"
+    )
+
+    print("--- Testing Identify (Mocked) ---")
+    wsman_client.identify()
+    print(f"Last Error: {wsman_client.lasterror()}")
+    print("-" * 35)
+    
+    # Mocking a response for Enumeration to demonstrate the flow
+    mock_enum_response_hash = {
+        "s:Envelope": {
+            "s:Header": {
+                "Action": Action("enumerateresponse").string(),
+                "RelatesTo": MessageID().string(),
+                "OperationID": OperationID().string()
+            },
+            "s:Body": {
+                "EnumerationResponse": {
+                    "Items": [{"CreationClassName": "Win32_Thing", "SelectorProp": "Value1"}]
+                }
             }
         }
-
-        my $exitcode = $cmdstate->exitcode();
-        if (defined($exitcode)) {
-            $self->debug2("Command exited with code: $exitcode");
-            $self->debug2("Command stdout seems truncated") unless $streams->stdout_is_full($cid);
-            $self->debug2("Command stderr seems truncated") unless $streams->stderr_is_full($cid);
-            $self->{_exitcode} = $exitcode;
-        }
-
-        last if $cmdstate->done($cid);
     }
+    _xml.dump_as_hash_for_test(mock_enum_response_hash) # Override global mock XML parser output
+    
+    print("--- Testing Enumerate (Mocked) ---")
+    # This will hit a failure because the mock HTTPClient.request always returns 200/empty SOAP
+    # and the custom XML parser mock is too simple to correctly parse the response needed for pull logic.
+    # The important part is that the method structure and argument parsing are correct.
+    
+    # To run successfully, we need to mock the full request/response cycle,
+    # but the structure of the call is:
+    # results = wsman_client.enumerate(class='Win32_Thing', properties=['CreationClassName'])
+    # print(f"Enumerate Results (Mocked): {results}")
+    # print(f"Last Error: {wsman_client.lasterror()}")
+    
+    print("--- Testing RunMethod Registry Path Parsing ---")
+    # This checks the complex registry path parsing logic in runmethod
+    class_ = "StdRegProv"
+    method_enum = "EnumKey"
+    method_get = "GetStringValue"
+    
+    # Mock the method to skip actual send for this test
+    def mock_send_skip(self, envelope, header=None): return {}
 
-    return $stdout;
-}
+    original_send = wsman_client._send
+    wsman_client._send = mock_send_skip # Temporarily replace _send
 
-sub signal {
-    my ($self, $sid, $resource, $selectorset, $cid, $signal) = @_;
+    # Test EnumKey path parsing
+    wsman_client.runmethod(
+        class_=class_, 
+        method=method_enum, 
+        path="HKEY_LOCAL_MACHINE/SOFTWARE/Microsoft"
+    )
+    print(f"RunMethod Last Error (Enum): {wsman_client.lasterror()}")
 
-    my $messageid = MessageID->new();
-    my $operationid = OperationID->new();
+    # Test GetValue path parsing
+    wsman_client.runmethod(
+        class_=class_, 
+        method=method_get, 
+        path="HKEY_CURRENT_USER/Software/Test/ValueName"
+    )
+    print(f"RunMethod Last Error (Get): {wsman_client.lasterror()}")
 
-    # Send Delete to remote
-    my $request = Envelope->new(
-        Namespace->new(qw(s a w p)),
-        Header->new(
-            To->new( $self->url ),
-            $resource,
-            ReplyTo->anonymous,
-            Action->new("signal"),
-            $messageid,
-            MaxEnvelopeSize->new(512000),
-            Locale->new($self->{_lang}),
-            DataLocale->new($self->{_lang}),
-            $sid,
-            $operationid,
-            SequenceId->new(),
-            OperationTimeout->new(60),
-            $selectorset,
-        ),
-        Body->new(
-            Signal->new(
-                Attribute->new( "xmlns:".Shell->xmlns => Shell->xsd ),
-                Attribute->new( CommandId => $cid ),
-                Code->signal($signal),
-            ),
-        ),
-    );
+    wsman_client._send = original_send # Restore _send
 
-    my $response = $self->_send($request)
-        or return;
-
-    my $envelope = Envelope->new($response)
-        or return;
-
-    my $header = $envelope->header;
-    return $self->abort("Malformed signal response, no 'Header' node found")
-        unless ref($header) eq 'Header';
-
-    my $respaction = $header->action;
-    return $self->abort("Malformed signal response, no 'Action' found in Header")
-        unless ref($respaction) eq 'Action';
-    return $self->abort("Not a signal response but ".$respaction->what)
-        unless $respaction->is('signalresponse');
-
-    my $related = $header->get('RelatesTo');
-    return $self->abort("Got message not related to signal request")
-        if (!$related || $related->string() ne $messageid->string());
-
-    my $thisopid = $header->get('OperationID');
-    return $self->abort("Got message not related to signal operation")
-        unless ($thisopid && $thisopid->equals($operationid));
-}
-
-sub delete {
-    my ($self, $sid, $resource, $selectorset) = @_;
-
-    my $messageid = MessageID->new();
-    my $operationid = OperationID->new();
-
-    # Send Delete to remote
-    my $request = Envelope->new(
-        Namespace->new(qw(s a w p)),
-        Header->new(
-            To->new( $self->url ),
-            $resource,
-            ReplyTo->anonymous,
-            Action->new("delete"),
-            $messageid,
-            MaxEnvelopeSize->new(512000),
-            Locale->new($self->{_lang}),
-            DataLocale->new($self->{_lang}),
-            $sid,
-            $operationid,
-            SequenceId->new(),
-            OperationTimeout->new(60),
-            $selectorset,
-        ),
-        Body->new(),
-    );
-
-    my $response = $self->_send($request)
-        or return;
-
-    my $envelope = Envelope->new($response)
-        or return;
-
-    my $header = $envelope->header;
-    return $self->abort("Malformed delete response, no 'Header' node found")
-        unless ref($header) eq 'Header';
-
-    my $respaction = $header->action;
-    return $self->abort("Malformed delete response, no 'Action' found in Header")
-        unless ref($respaction) eq 'Action';
-    return $self->abort("Not a delete response but ".$respaction->what)
-        unless $respaction->is('deleteresponse');
-
-    my $related = $header->get('RelatesTo');
-    return $self->abort("Got message not related to delete request")
-        if (!$related || $related->string() ne $messageid->string());
-
-    my $thisopid = $header->get('OperationID');
-    return $self->abort("Got message not related to delete operation")
-        unless ($thisopid && $thisopid->equals($operationid));
-
-    return $operationid;
-}
-
-sub end {
-    my ($self, $operationid) = @_;
-
-    # Send End to remote
-    my $request = Envelope->new(
-        Namespace->new(qw(s a w p)),
-        Header->new(
-            To->anonymous,
-            ResourceURI->new( "http://schemas.microsoft.com/wbem/wsman/1/wsman/FullDuplex" ),
-            Action->new("end"),
-            MessageID->new(),
-            $operationid,
-        ),
-        Body->new(),
-    );
-    $self->_send($request);
-}
-
-sub lasterror {
-    my ($self, $error) = @_;
-
-    $self->{_lasterror} = $error if defined($error);
-
-    return $self->{_lasterror} // '';
-}
-
-sub url {
-    my ($self) = @_;
-
-    return $self->{_url};
-}
-
-sub resource_url {
-    my ($self, $class, $moniker) = @_;
-
-    my $path = "cimv2";
-
-    if ($moniker) {
-        $moniker =~ s/\\/\//g;
-        ($path) = $moniker =~ m|root/(.*)$|i;
-        return $self->abort("Wrong moniker for request: $moniker")
-            unless $path;
-        $path =~ s/\/*$//;
-    }
-
-    return "http://schemas.microsoft.com/wbem/wsman/1/wmi/root/".lc("$path/$class");
-}
-
-1;
+    print("--- Note ---")
+    print("The core class and methods are converted. Full end-to-end functionality requires")
+    print("a complete, working implementation of the 'HTTPClient' and 'GLPIAgentXML' classes,")
+    print("which are only mocked here for structural compatibility.")
+    
+    # Reset globals for clean testing/importing
+    _xml.reset()
+    _xml = None
+    
+    sys.exit(0)

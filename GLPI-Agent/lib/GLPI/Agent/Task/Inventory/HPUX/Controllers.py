@@ -1,52 +1,54 @@
-package GLPI::Agent::Task::Inventory::HPUX::Controllers;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory HPUX Controllers - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any, List, Dict
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_all_lines
 
-use GLPI::Agent::Tools;
 
-use constant    category    => "controller";
-
-sub isEnabled {
-    return canRun('ioscan');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    foreach my $type (qw/ext_bus fc psi/) {
-        foreach my $controller (_getControllers(
-            command => "ioscan -kFC $type",
-            logger  => $logger
-        )) {
-            $inventory->addEntry(
-                section => 'CONTROLLERS',
-                entry   => $controller
-            );
-        }
-    }
-}
-
-sub _getControllers {
-    my (%params) = @_;
-
-    my @lines = getAllLines(%params)
-        or return;
-
-    my @controllers;
-    foreach my $line (@lines) {
-        my @info = split(/:/, $line);
-        push @controllers, {
-            TYPE => $info[17]
-        };
-    }
-
-    return @controllers;
-}
-
-1;
+class Controllers(InventoryModule):
+    """HP-UX controllers detection module."""
+    
+    category = "controller"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('ioscan')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        for controller_type in ['ext_bus', 'fc', 'psi']:
+            for controller in Controllers._get_controllers(
+                command=f"ioscan -kFC {controller_type}",
+                logger=logger
+            ):
+                if inventory:
+                    inventory.add_entry(
+                        section='CONTROLLERS',
+                        entry=controller
+                    )
+    
+    @staticmethod
+    def _get_controllers(**params) -> List[Dict[str, str]]:
+        """Parse ioscan output for controllers."""
+        lines = get_all_lines(**params)
+        if not lines:
+            return []
+        
+        controllers = []
+        for line in lines:
+            info = line.split(':')
+            if len(info) > 17:
+                controllers.append({
+                    'TYPE': info[17]
+                })
+        
+        return controllers

@@ -1,55 +1,69 @@
-package GLPI::Agent::Task::Inventory::Generic::Dmidecode::Ports;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Generic Dmidecode Ports - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any, Dict, List, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools.Generic import get_dmidecode_infos
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Generic;
 
-use constant    category    => "port";
-
-sub isEnabled {
-    return 1;
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $ports = _getPorts(logger => $logger);
-
-    return unless $ports;
-
-    foreach my $port (@$ports) {
-        $inventory->addEntry(
-            section => 'PORTS',
-            entry   => $port
-        );
-    }
-}
-
-sub _getPorts {
-    my $infos = getDmidecodeInfos(@_);
-
-    return unless $infos->{8};
-
-    my $ports;
-    foreach my $info (@{$infos->{8}}) {
-        my $port = {
-            CAPTION     => $info->{'External Reference Designator'} // $info->{'External Connector Type'} // $info->{'External Designator'},
-            DESCRIPTION => $info->{'Internal Connector Type'} // $info->{'External Designator'} // $info->{'Internal Designator'} // $info->{'External Connector Type'},
-            NAME        => $info->{'Internal Reference Designator'} // $info->{'External Reference Designator'} // $info->{'Internal Designator'} // $info->{'External Designator'},
-            TYPE        => $info->{'Port Type'} // $info->{'External Connector Type'},
-        };
-
-        push @$ports, $port;
-    }
-
-    return $ports;
-}
-
-1;
+class Ports(InventoryModule):
+    """Dmidecode ports inventory module."""
+    
+    @staticmethod
+    def category() -> str:
+        """Return the inventory category."""
+        return "port"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return True
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        ports = Ports._get_ports(logger=logger)
+        
+        if not ports:
+            return
+        
+        for port in ports:
+            if inventory:
+                inventory.add_entry(
+                    section='PORTS',
+                    entry=port
+                )
+    
+    @staticmethod
+    def _get_ports(**params) -> Optional[List[Dict[str, Optional[str]]]]:
+        """Get ports from dmidecode."""
+        infos = get_dmidecode_infos(**params)
+        
+        if not infos or not infos.get(8):
+            return None
+        
+        ports = []
+        for info in infos[8]:
+            port = {
+                'CAPTION': (info.get('External Reference Designator') or 
+                          info.get('External Connector Type') or 
+                          info.get('External Designator')),
+                'DESCRIPTION': (info.get('Internal Connector Type') or 
+                              info.get('External Designator') or 
+                              info.get('Internal Designator') or 
+                              info.get('External Connector Type')),
+                'NAME': (info.get('Internal Reference Designator') or 
+                        info.get('External Reference Designator') or 
+                        info.get('Internal Designator') or 
+                        info.get('External Designator')),
+                'TYPE': info.get('Port Type') or info.get('External Connector Type'),
+            }
+            ports.append(port)
+        
+        return ports

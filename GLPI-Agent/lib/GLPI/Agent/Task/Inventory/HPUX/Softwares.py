@@ -1,66 +1,75 @@
-package GLPI::Agent::Task::Inventory::HPUX::Softwares;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory HPUX Softwares - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, List, Dict, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_all_lines
 
-use GLPI::Agent::Tools;
 
-use constant    category    => "software";
-
-sub isEnabled  {
-    return
-        canRun('swlist');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $list = _getSoftwaresList(
-        command => 'swlist',
-        logger => $logger
-    );
-
-    return unless $list;
-
-    foreach my $software (@$list) {
-        $inventory->addEntry(
-            section => 'SOFTWARES',
-            entry   => $software
-        );
-    }
-}
-
-sub _getSoftwaresList {
-    my (%params) = @_;
-
-    my @lines = getAllLines(%params)
-        or return;
-
-    my @softwares;
-    foreach my $line (@lines) {
-        next unless $line =~ /^
-            \s\s     # two spaces
-            (\S+)    # name
-            \s+
-            (\S+)    # version
-            \s+
-            (\S.*\S) # comment
-        /x;
-        next if $1 =~ /^PH/;
-        push @softwares, {
-            NAME      => $1,
-            VERSION   => $2,
-            COMMENTS  => $3,
-            PUBLISHER => 'HP'
-        };
-    }
-
-    return \@softwares;
-}
-
-1;
+class Softwares(InventoryModule):
+    """HP-UX software packages detection module."""
+    
+    category = "software"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('swlist')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        software_list = Softwares._get_softwares_list(
+            command='swlist',
+            logger=logger
+        )
+        
+        if not software_list:
+            return
+        
+        for software in software_list:
+            if inventory:
+                inventory.add_entry(
+                    section='SOFTWARES',
+                    entry=software
+                )
+    
+    @staticmethod
+    def _get_softwares_list(**params) -> Optional[List[Dict[str, str]]]:
+        """Parse swlist output."""
+        lines = get_all_lines(**params)
+        if not lines:
+            return None
+        
+        softwares = []
+        for line in lines:
+            match = re.match(
+                r'^\s\s'       # two spaces
+                r'(\S+)\s+'    # name
+                r'(\S+)\s+'    # version
+                r'(\S.*\S)',   # comment
+                line
+            )
+            if not match:
+                continue
+            
+            name = match.group(1)
+            # Skip patches (start with PH)
+            if name.startswith('PH'):
+                continue
+            
+            softwares.append({
+                'NAME': name,
+                'VERSION': match.group(2),
+                'COMMENTS': match.group(3),
+                'PUBLISHER': 'HP'
+            })
+        
+        return softwares

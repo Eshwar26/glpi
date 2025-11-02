@@ -1,166 +1,158 @@
-package GLPI::Agent::Task::Inventory::Virtualization::Wsl;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Virtualization WSL - Python Implementation
+"""
 
-use strict;
-use warnings;
+import os
+import re
+import sys
+from typing import Any, Dict, List, Optional, Tuple
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, has_file, has_folder, get_all_lines
+from GLPI.Agent.Tools.Virtualization import STATUS_RUNNING
 
-use English qw(-no_match_vars);
-use UNIVERSAL::require;
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::UUID;
-use GLPI::Agent::Tools::Virtualization;
+class Wsl(InventoryModule):
+    # Maintain runAfterIfEnabled behavior from Perl
+    runAfterIfEnabled = [
+        'GLPI::Agent::Task::Inventory::Win32::Hardware',
+        'GLPI::Agent::Task::Inventory::Win32::CPU',
+    ]
 
-our $runAfterIfEnabled = [ qw(
-    GLPI::Agent::Task::Inventory::Win32::Hardware
-    GLPI::Agent::Task::Inventory::Win32::CPU
-)];
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        return sys.platform == 'win32' and can_run('wsl')
 
-sub isEnabled {
-    return OSNAME eq "MSWin32" && canRun('wsl');
-}
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        inventory = params.get('inventory')
+        logger = params.get('logger')
 
-sub doInventory {
-    my (%params) = @_;
+        for machine in Wsl._get_users_wsl_instances(inventory=inventory, logger=logger):
+            if inventory:
+                inventory.add_entry(section='VIRTUALMACHINES', entry=machine)
 
-    my $inventory = $params{inventory};
+    @staticmethod
+    def _get_users_wsl_instances(**params) -> List[Dict[str, Any]]:
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        machines: List[Dict[str, Any]] = []
 
-    my @machines = _getUsersWslInstances(%params);
+        # Defer Win32 imports to runtime
+        try:
+            from GLPI.Agent.Tools.Win32 import get_wmi_objects, load_user_hive, get_registry_key, cleanup_privileges
+            from GLPI.Agent.Tools.Win32.Users import getSystemUserProfiles, getProfileUsername
+        except ImportError:
+            return []
 
-    foreach my $machine (@machines) {
-        $inventory->addEntry(
-            section => 'VIRTUALMACHINES', entry => $machine
-        );
-    }
-}
+        cpus = getattr(inventory, 'getSection', lambda *_: [{}])('CPUS') or [{}]
+        vcpu = 0
+        for cpu in cpus:
+            vcpu += cpu.get('CORE', 1)
+        memory = getattr(inventory, 'getHardware', lambda *_: None)('MEMORY')
 
-sub  _getUsersWslInstances {
-    my (%params) = @_;
+        os_obj = None
+        for obj in get_wmi_objects(class_name='Win32_OperatingSystem', properties=['Version']):
+            os_obj = obj
+            break
+        kernel_version = (os_obj or {}).get('Version', '')
+        m_build = re.match(r'^\d+\.\d+\.(\d+)', kernel_version)
+        build = int(m_build.group(1)) if m_build else None
 
-    my @machines;
+        for user in getSystemUserProfiles():
+            sid = user.get('SID')
+            lxsskey = None
+            userhive = None
+            if not user.get('LOADED'):
+                ntuserdat = f"{user.get('PATH')}/NTUSER.DAT"
+                userhive = load_user_hive(sid=sid, file=ntuserdat)
 
-    # Always load Win32 API as late as possible
-    GLPI::Agent::Tools::Win32->require();
-    GLPI::Agent::Tools::Win32::Users->require();
+            lxsskey = get_registry_key(
+                path=f"HKEY_USERS/{sid}/SOFTWARE/Microsoft/Windows/CurrentVersion/Lxss/",
+                required=['BasePath', 'DistributionName'],
+            )
+            if not lxsskey:
+                continue
 
-    # Prepare vcpu, memory and a serial from still inventoried CPUS, HARDWARE & BIOS
-    my $cpus = $params{inventory}->getSection('CPUS') // [{}];
-    my $vcpu = 0;
-    map { $vcpu += $_->{CORE} // 1 } @{$cpus};
-    my $memory = $params{inventory}->getHardware('MEMORY');
+            usermem, uservcpu = None, None
+            wslconfig = f"{user.get('PATH')}/.wslconfig"
+            if has_file(wslconfig):
+                usermem, uservcpu = Wsl._parse_wsl_config(file=wslconfig, logger=logger)
 
-    # Get system build revision to handle default max memory with WSL2
-    my ($operatingSystem) = GLPI::Agent::Tools::Win32::getWMIObjects(
-        class      => 'Win32_OperatingSystem',
-        properties => [ qw/Version/ ]
-    );
-    my $kernel_version = $operatingSystem->{Version} // '';
-    my ($build) = $kernel_version =~ /^\d+\.\d+\.(\d+)/;
+            for sub in list(lxsskey.keys()):
+                if not re.match(r'^\{........-....-....-....-............\}/$', sub):
+                    continue
+                basepath = lxsskey[sub].get('/BasePath')
+                distro = lxsskey[sub].get('/DistributionName')
+                if not basepath or not distro:
+                    continue
+                username = getProfileUsername(user)
+                hostname = f"{distro} on {username} account" if username else f"{distro} on {sid} profile"
 
-    # Search users profiles for existing WSL instance
-    foreach my $user (GLPI::Agent::Tools::Win32::Users::getSystemUserProfiles()) {
-        my $sid = $user->{SID};
+                # Create an UUID derived from SID and distro name
+                uuid = Wsl._uuid_from_name(f"{sid}/{distro}")
 
-        my ($lxsskey, $userhive);
-        unless ($user->{LOADED}) {
-            my $ntuserdat = $user->{PATH}."/NTUSER.DAT";
-            # This call involves we use cleanupPrivileges before leaving
-            $userhive = GLPI::Agent::Tools::Win32::loadUserHive( sid => $sid, file => $ntuserdat );
-        }
-        $lxsskey = GLPI::Agent::Tools::Win32::getRegistryKey(
-            path        => "HKEY_USERS/$sid/SOFTWARE/Microsoft/Windows/CurrentVersion/Lxss/",
-            # Important for remote inventory optimization
-            required    => [ qw/BasePath DistributionName/ ],
-        )
-            or next;
+                version = '1' if has_folder(f"{basepath}/rootfs/etc") else '2'
 
-        # Support WSL2 memory/vcpu configuration
-        my ($usermem, $uservcpu);
-        if (has_file($user->{PATH}."/.wslconfig")) {
-            ($usermem, $uservcpu) = _parseWslConfig(
-                file    => $user->{PATH}."/.wslconfig",
-                %params
-            );
-        }
+                maxmemory = memory
+                maxvcpu = vcpu
+                if version == '2':
+                    if uservcpu:
+                        maxvcpu = uservcpu
+                    if usermem:
+                        maxmemory = usermem
+                    elif build and build < 20175:
+                        maxmemory = int(0.8 * (memory or 0)) if memory else None
+                    else:
+                        maxmemory = int(0.5 * (memory or 0)) if memory else None
+                        if maxmemory and maxmemory > 8192:
+                            maxmemory = 8192
 
-        foreach my $sub (keys(%{$lxsskey})) {
-            # We will use install GUID as WSL instance UUID
-            next unless $sub =~ /^{(........-....-....-....-............)}\/$/;
-            my $basepath = $lxsskey->{$sub}->{'/BasePath'}
-                or next;
-            my $distro = $lxsskey->{$sub}->{'/DistributionName'}
-                or next;
-            my $username = GLPI::Agent::Tools::Win32::Users::getProfileUsername($user);
-            my $hostname = $username ? "$distro on $username account" : "$distro on $sid profile";
+                machines.append({
+                    'NAME': hostname,
+                    'VMTYPE': f"WSL{version}",
+                    'SUBSYSTEM': 'WSL',
+                    'VCPU': maxvcpu,
+                    'MEMORY': maxmemory,
+                    'UUID': uuid,
+                })
 
-            # Create an UUID based on user SID and distro name
-            my $uuid = uc(create_uuid_from_name($user->{SID}."/".$distro));
+            if userhive:
+                cleanup_privileges()
 
-            my $version = has_folder($basepath."/rootfs/etc") ? "1" : "2";
+        return machines
 
-            my $maxmemory = $memory;
-            my $maxvcpu = $vcpu;
-            if ($version eq "2") {
-                $maxvcpu = $uservcpu if $uservcpu;
-                if ($usermem) {
-                    $maxmemory = $usermem;
-                } elsif ($build && $build < 20175) {
-                    # See https://docs.microsoft.com/en-us/windows/wsl/wsl-config#wsl-2-settings
-                    # By default 80% of total memory on older builds
-                    $maxmemory = int(0.8 * $memory);
-                } else {
-                    # By default the less of 50% of total memory or 8GB
-                    $maxmemory = int(0.5 * $memory);
-                    $maxmemory = 8192 if $maxmemory > 8192;
-                }
-            }
+    @staticmethod
+    def _parse_wsl_config(**params) -> Tuple[Optional[int], Optional[int]]:
+        lines = get_all_lines(**params) or []
+        memory = None
+        vcpu = None
+        wsl2 = False
+        for line in lines:
+            m_sec = re.match(r'^\[(.*)\]', line)
+            if m_sec:
+                wsl2 = m_sec.group(1).strip().lower() == 'wsl2'
+                continue
+            if not wsl2:
+                continue
+            m_mem = re.match(r'^memory\s*=\s*(\S+)', line)
+            if m_mem:
+                size = m_mem.group(1)
+                # add B suffix if missing
+                if not re.search(r'b$', size, re.I):
+                    size += 'B'
+                from GLPI.Agent.Tools import get_canonical_size as _gcs
+                memory = _gcs(size, 1024)
+                continue
+            m_cpu = re.match(r'^processors\s*=\s*(\d+)', line)
+            if m_cpu:
+                vcpu = int(m_cpu.group(1))
+        return memory, vcpu
 
-            push @machines, {
-                NAME        => $hostname,
-                VMTYPE      => "WSL$version",
-                SUBSYSTEM   => "WSL",
-                VCPU        => $maxvcpu,
-                MEMORY      => $maxmemory,
-                UUID        => $uuid,
-            };
-        }
+    @staticmethod
+    def _uuid_from_name(name: str) -> str:
+        import hashlib
+        # Upper-case hex to match Perl uc(create_uuid_from_name(...)) semantics
+        return hashlib.sha1(name.encode('utf-8')).hexdigest().upper()
 
-        # Free memory before leaving the block to avoid a Win32API error while
-        # userhive is automatically unloaded
-        undef $lxsskey if $userhive;
-    }
-
-    GLPI::Agent::Tools::Win32::cleanupPrivileges();
-
-    return @machines;
-}
-
-sub _parseWslConfig {
-    my (%params) = @_;
-
-    my ($memory, $vcpu, $wsl2);
-
-    foreach my $line (getAllLines(%params)) {
-        # Find wsl2 section
-        if ($line =~ /^\[(.*)\]/) {
-            if ($1 eq "wsl2") {
-                $wsl2 = 1;
-            } else {
-                $wsl2 = 0;
-            }
-            next;
-        }
-        next unless $wsl2;
-        # Analyse wsl2 section lines
-        if (my ($size) = $line =~ /^memory\s*=\s*(\S+)/) {
-            $memory = getCanonicalSize($size.($size =~ /b$/i ? '' : 'B'), 1024);
-        } elsif ($line =~ /^processors\s*=\s*(\d+)/) {
-            $vcpu = $1;
-        }
-    }
-
-    return ($memory, $vcpu);
-}
-
-1;

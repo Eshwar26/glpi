@@ -1,468 +1,460 @@
-package GLPI::Agent::SOAP::VMware::Host;
+import re
+import uuid as uuid_module
+from typing import Any, Dict, List, Optional, Union
 
-use strict;
-use warnings;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.tools import empty, glpi_version
+# from glpi.agent.tools.virtualization import STATUS_RUNNING, STATUS_OFF, STATUS_PAUSED
+# from glpi.agent.tools import get_canonical_manufacturer  # Assuming this exists
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Virtualization;
-use GLPI::Agent::Tools::UUID;
+# Define if not available
+def empty(value: Any) -> bool:
+    return value is None or value == '' or (isinstance(value, (list, dict)) and not value)
 
-sub new {
-    my ($class, %params) = @_;
+def glpi_version(version: str) -> float:
+    # Placeholder: map version string to float, e.g., '9.5' -> 9.5, '10.0.17' -> 10.0017
+    # Implement based on actual logic
+    return float(version.replace('.', '')[:4]) / 100  # Simple placeholder
 
-    my $self = {
-        hash => $params{hash},
-        vms  => $params{vms}
-    };
+STATUS_RUNNING = 'running'
+STATUS_OFF = 'off'
+STATUS_PAUSED = 'paused'
 
-    bless $self, $class;
 
-    return $self;
-}
+class VMwareHost:
+    """
+    Equivalent to GLPI::Agent::SOAP::VMware::Host
+    VMware Host abstraction layer.
+    """
 
-sub _asArray {
-    my $h = shift;
+    def __init__(self, **params):
+        self.hash_ = params.get('hash', [])  # List of dicts
+        self.vms = params.get('vms', [])
+        self.glpi = None
 
-    return
-        ref $h eq 'ARRAY' ? @$h  :
-            $h            ? ($h) :
-                            ()   ;
-}
+    def _as_array(self, h: Any) -> List[Any]:
+        if isinstance(h, list):
+            return h
+        elif h:
+            return [h]
+        else:
+            return []
 
-sub enableFeaturesForGlpiVersion {
-    my ($self, $version) = @_;
+    def enable_features_for_glpi_version(self, version: str):
+        if not empty(version):
+            self.glpi = glpi_version(version)
 
-    return if empty($version);
+    def support_glpi_version(self, version: str) -> bool:
+        return self.glpi is not None and self.glpi >= glpi_version(version)
 
-    $self->{glpi} = glpiVersion($version);
-}
+    def get_boot_time(self) -> Optional[str]:
+        return self.hash_[0]['summary']['runtime'].get('bootTime')
 
-sub supportGlpiVersion {
-    my ($self, $version) = @_;
+    def get_hostname(self) -> Optional[str]:
+        return self.hash_[0].get('name')
 
-    return exists($self->{glpi}) && $self->{glpi} >= glpiVersion($version);
-}
+    def get_bios_info(self) -> Optional[Dict[str, str]]:
+        if not self.hash_:
+            return None
+        hardware = self.hash_[0]['hardware']
+        bios_info = hardware.get('biosInfo')
+        system_info = hardware.get('systemInfo')
+        if not isinstance(bios_info, dict):
+            return None
 
-sub getBootTime {
-    my ($self) = @_;
+        bios = {
+            'BDATE': bios_info.get('releaseDate', ''),
+            'BVERSION': bios_info.get('biosVersion', ''),
+            'SMODEL': system_info.get('model', '') if isinstance(system_info, dict) else '',
+            'SMANUFACTURER': system_info.get('vendor', '') if isinstance(system_info, dict) else '',
+        }
 
-    return $self->{hash}[0]{summary}{runtime}{bootTime};
-}
+        other_identifying_info = system_info.get('otherIdentifyingInfo') if isinstance(system_info, dict) else None
+        if isinstance(other_identifying_info, dict):
+            bios['ASSETTAG'] = other_identifying_info.get('identifierValue', '')
+        elif isinstance(other_identifying_info, list):
+            ssn_set = False
+            for info in other_identifying_info:
+                if not isinstance(info, dict) or 'identifierType' not in info:
+                    continue
+                key = info['identifierType'].get('key', '')
+                value = info.get('identifierValue', '')
+                if key == 'ServiceTag':
+                    if 'SSN' in bios:
+                        bios['MSN'] = bios['SSN']
+                    bios['SSN'] = value
+                    ssn_set = True
+                elif key == 'AssetTag':
+                    bios['ASSETTAG'] = value
+                elif key == 'EnclosureSerialNumberTag':
+                    bios['MSN'] = value
+                elif key == 'SerialNumberTag':
+                    bios['SSN'] = value
 
-sub getHostname {
-    my ($self) = @_;
+        return bios
 
-    return $self->{hash}[0]{name}
+    def get_hardware_info(self) -> Dict[str, Any]:
+        if not self.hash_:
+            return {}
+        host = self.hash_[0]
+        dns_config = host.get('config', {}).get('network', {}).get('dnsConfig', {})
+        hardware = host.get('hardware', {})
+        summary = host.get('summary', {})
+        system_info = hardware.get('systemInfo', {})
 
-}
+        return {
+            'NAME': dns_config.get('hostName', ''),
+            'DNS': '/'.join(self._as_array(dns_config.get('address', []))),
+            'WORKGROUP': dns_config.get('domainName', ''),
+            'MEMORY': int(hardware.get('memorySize', 0) / (1024 * 1024)),
+            'UUID': summary.get('hardware', {}).get('uuid') or system_info.get('uuid', ''),
+        }
 
-sub getBiosInfo {
-    my ($self) = @_;
+    def get_operating_system_info(self) -> Dict[str, Any]:
+        if not self.hash_:
+            return {}
+        host = self.hash_[0]
+        dns_config = host.get('config', {}).get('network', {}).get('dnsConfig', {})
+        product = host.get('summary', {}).get('config', {}).get('product', {})
 
-    my $hardware   = $self->{hash}[0]{hardware};
-    my $biosInfo   = $hardware->{biosInfo};
-    my $systemInfo = $hardware->{systemInfo};
+        boot_time_raw = host.get('summary', {}).get('runtime', {}).get('bootTime', '')
+        bootdate_match = re.match(r'^([0-9-]+)T([0-9:]+)\.', boot_time_raw)
+        bootdate, boottime = bootdate_match.groups() if bootdate_match else ('', '')
+        boottime = f"{bootdate} {boottime}" if bootdate and boottime else ''
 
-    return unless ref($biosInfo) eq 'HASH';
+        os_info = {
+            'NAME': product.get('name', ''),
+            'VERSION': product.get('version', ''),
+            'FULL_NAME': product.get('fullName', ''),
+            'FQDN': host.get('name', ''),
+            'DNS_DOMAIN': dns_config.get('domainName', ''),
+            'BOOT_TIME': boottime,
+        }
 
-    my $bios = {
-        BDATE         => $biosInfo->{releaseDate},
-        BVERSION      => $biosInfo->{biosVersion},
-        SMODEL        => $systemInfo->{model},
-        SMANUFACTURER => $systemInfo->{vendor}
-    };
-
-    if (ref($systemInfo->{otherIdentifyingInfo}) eq 'HASH') {
-        $bios->{ASSETTAG} = $systemInfo->{otherIdentifyingInfo}->{identifierValue};
-    }
-    elsif (ref($systemInfo->{otherIdentifyingInfo}) eq 'ARRAY') {
-        foreach (@{$systemInfo->{otherIdentifyingInfo}}) {
-            if ($_->{identifierType}->{key} eq 'ServiceTag') {
-                # In the case we found more than one ServiceTag, assume there will be
-                # only two, the first being the chassis S/N, the second the system S/N
-                # This cover the case where the second is the lame board S/N
-                # This works for ESXi 6.0 but no more for ESXi 6.5. In ESXi 6.5
-                # before build-10884925, ServiceTag contains chassis/enclosure S/N
-                # for at least Dell PowerEdge M6XX series. Since build-10884925,
-                # ServiceTag contains system S/N and appears before EnclosureSerialNumberTag
-                # and SerialNumberTag values.
-                if ($bios->{SSN}) {
-                    $bios->{MSN} = $bios->{SSN};
-                }
-                $bios->{SSN} = $_->{identifierValue};
-
-            } elsif ($_->{identifierType}->{key} eq 'AssetTag') {
-                $bios->{ASSETTAG} = $_->{identifierValue};
-
-            # Since VMware ESXi 6.5, Patch Release ESXi650-201811002 (build-10884925),
-            # enclosure and system serial numbers are availables
-            } elsif ($_->{identifierType}->{key} eq 'EnclosureSerialNumberTag') {
-                $bios->{MSN} = $_->{identifierValue};
-
-            } elsif ($_->{identifierType}->{key} eq 'SerialNumberTag') {
-                $bios->{SSN} = $_->{identifierValue};
+        dtinfo = host.get('config', {}).get('dateTimeInfo', {})
+        timezone = dtinfo.get('timeZone', {}) if isinstance(dtinfo, dict) else {}
+        offset = timezone.get('gmtOffset')
+        if offset is not None:
+            offset_hours = offset / 3600
+            sign = '-' if offset_hours < 0 else '+'
+            abs_offset = abs(offset_hours) * 100
+            os_info['TIMEZONE'] = {
+                'NAME': timezone.get('name', ''),
+                'OFFSET': f"{sign}{abs_offset:04d}",
             }
-        }
-    }
 
-    return $bios;
-}
+        return os_info
 
-sub getHardwareInfo {
-    my ($self) = @_;
+    def get_cpus(self) -> List[Dict[str, Any]]:
+        if not self.hash_:
+            return []
+        hardware = self.hash_[0]['hardware']
+        cpu_info = hardware.get('cpuInfo', {})
+        total_cores = cpu_info.get('numCpuCores', 0)
+        total_threads = cpu_info.get('numCpuThreads', 0)
+        cpu_entries = self._as_array(hardware.get('cpuPkg', []))
+        cpu_packages = cpu_info.get('numCpuPackages') or len(cpu_entries)
 
-    my $dnsConfig  = $self->{hash}[0]{config}{network}{dnsConfig};
-    my $hardware   = $self->{hash}[0]{hardware};
-    my $summary    = $self->{hash}[0]{summary};
-    my $systemInfo = $hardware->{systemInfo};
-
-    return {
-        NAME       => $dnsConfig->{hostName},
-        DNS        => join('/', _asArray($dnsConfig->{address})),
-        WORKGROUP  => $dnsConfig->{domainName},
-        MEMORY     => int($hardware->{memorySize} / (1024 * 1024)),
-        UUID       => $summary->{hardware}->{uuid} || $systemInfo->{uuid},
-    };
-}
-
-sub getOperatingSystemInfo {
-    my ($self) = @_;
-
-    my $host = $self->{hash}->[0];
-
-    my $dnsConfig  = $host->{config}->{network}->{dnsConfig};
-    my $product    = $host->{summary}->{config}->{product};
-
-    my ($bootdate, $boottime) =
-        $host->{summary}->{runtime}->{bootTime} =~ /^([0-9-]+)T([0-9:]+)\./;
-    $boottime = "$bootdate $boottime" if $bootdate && $boottime;
-
-    my $os = {
-        NAME       => $product->{name},
-        VERSION    => $product->{version},
-        FULL_NAME  => $product->{fullName},
-        FQDN       => $host->{name},
-        DNS_DOMAIN => $dnsConfig->{domainName},
-        BOOT_TIME  => $boottime,
-    };
-
-    my $dtinfo = $host->{config}->{dateTimeInfo};
-    if ($dtinfo && $dtinfo->{timeZone}) {
-        my $offset = $dtinfo->{timeZone}->{gmtOffset};
-        if (defined($offset)) {
-            $os->{TIMEZONE}->{NAME} = $dtinfo->{timeZone}->{name};
-            $offset /= 3600;
-            $os->{TIMEZONE}->{OFFSET} = sprintf("%s%04d", $offset < 0 ? "-" : "+", abs($offset)*100);
-        }
-    }
-
-    return $os;
-}
-
-sub getCPUs {
-    my ($self) = @_;
-
-    my %cpuManufacturor = (
-        amd   => 'AMD',
-        intel => 'Intel',
-    );
-
-    my $hardware    = $self->{hash}[0]{hardware};
-    my $totalCore   = $hardware->{cpuInfo}{numCpuCores};
-    my $totalThread = $hardware->{cpuInfo}{numCpuThreads};
-    my $cpuEntries  = $hardware->{cpuPkg};
-    my $cpuPackages = $hardware->{cpuInfo}{numCpuPackages} ||
-        scalar(_asArray($cpuEntries));
-
-    my @cpus;
-    foreach (_asArray($cpuEntries)) {
-        push @cpus,
-          {
-            CORE         => eval { $totalCore / $cpuPackages },
-            MANUFACTURER => $cpuManufacturor{ $_->{vendor} } || $_->{vendor},
-            NAME         => $_->{description},
-            SPEED        => int( $_->{hz} / ( 1000 * 1000 ) ),
-            THREAD       => eval { $totalThread / $totalCore }
-          };
-    }
-
-    return @cpus;
-}
-
-sub getControllers {
-    my ($self) = @_;
-
-    my @controllers;
-
-    foreach my $device ( @{ $self->{hash}[0]{hardware}{pciDevice} } ) {
-
-        my $controller = {
-            NAME           => $device->{deviceName},
-            MANUFACTURER   => $device->{vendorName},
-            PCICLASS       => substr(sprintf("%04x", $device->{classId}), -4),
-            VENDORID       => substr(sprintf("%04x", $device->{vendorId}), -4),
-            PRODUCTID      => substr(sprintf("%04x", $device->{deviceId}), -4),
-            PCISLOT        => $device->{id},
-        };
-
-        if ($device->{subVendorId} || $device->{subDeviceId}) {
-            $controller->{PCISUBSYSTEMID} = substr(sprintf("%04x", $device->{subVendorId}), -4).
-                ":".substr(sprintf("%04x", $device->{subDeviceId}), -4);
+        cpu_manufacturer_map = {
+            'amd': 'AMD',
+            'intel': 'Intel',
         }
 
-        push @controllers, $controller;
-    }
+        cpus = []
+        core_per_pkg = total_cores / cpu_packages if cpu_packages else 0
+        thread_per_core = total_threads / total_cores if total_cores else 0
 
-    return @controllers;
-}
+        for entry in cpu_entries:
+            if not isinstance(entry, dict):
+                continue
+            cpus.append({
+                'CORE': core_per_pkg,
+                'MANUFACTURER': cpu_manufacturer_map.get(entry.get('vendor', '').lower(), entry.get('vendor', '')),
+                'NAME': entry.get('description', ''),
+                'SPEED': int(entry.get('hz', 0) / (1000 * 1000)),
+                'THREAD': thread_per_core,
+            })
 
-sub _getNic {
-    my ($ref, $isVirtual) = @_;
+        return cpus
 
-    my $nic = {
-        VIRTUALDEV  => $isVirtual,
-    };
+    def get_controllers(self) -> List[Dict[str, str]]:
+        if not self.hash_:
+            return []
+        pci_devices = self._as_array(self.hash_[0].get('hardware', {}).get('pciDevice', []))
 
-    my %binding = qw(
-        DESCRIPTION device
-        DRIVER      driver
-        PCISLOT     pci
-        MACADDR     mac
-    );
-
-    while (my ($key, $dump) = each %binding) {
-        next unless $ref->{$dump};
-        $nic->{$key} = $ref->{$dump};
-    }
-
-    my $spec = $ref->{spec};
-    if ($spec) {
-        my $ip = $spec->{ip};
-        if ($ip) {
-            $nic->{IPADDRESS} = $ip->{ipAddress}  if $ip->{ipAddress};
-            $nic->{IPMASK}    = $ip->{subnetMask} if $ip->{subnetMask};
-        }
-        $nic->{MACADDR} = $spec->{mac} if !$nic->{MACADDR} && $spec->{mac};
-        $nic->{MTU}     = $spec->{mtu} if $spec->{mtu};
-        $nic->{SPEED}   = $spec->{linkSpeed}->{speedMb}
-            if $spec->{linkSpeed} && $spec->{linkSpeed}->{speedMb};
-    }
-    $nic->{STATUS} = $nic->{IPADDRESS} ? 'Up' : 'Down';
-
-    return $nic;
-}
-
-sub getNetworks {
-    my ($self) = @_;
-
-    my @networks;
-
-    my $seen = {};
-
-    foreach my $nicType (qw/vnic pnic consoleVnic/)  {
-        foreach (_asArray($self->{hash}[0]{config}{network}{$nicType}))
-        {
-            next if $seen->{$_->{device}}++;
-            my $isVirtual = $nicType eq 'vnic'?1:0;
-            push @networks, _getNic($_, $isVirtual);
-        }
-    }
-
-    my @vnic;
-    push @vnic, $self->{hash}[0]{config}{network}{consoleVnic}
-        if $self->{hash}[0]{config}{network}{consoleVnic};
-    push @vnic, $self->{hash}[0]{config}{vmotion}{netConfig}{candidateVnic}
-        if $self->{hash}[0]{config}{vmotion}{netConfig}{candidateVnic};
-    foreach my $entry (@vnic) {
-        foreach (_asArray($entry)) {
-            next if $seen->{$_->{device}}++;
-
-            push @networks, _getNic($_, 1);
-        }
-    }
-
-    return @networks;
-}
-
-sub getStorages {
-    my ($self) = @_;
-
-    my @storages;
-    foreach my $entry (
-        _asArray($self->{hash}[0]{config}{storageDevice}{scsiLun}))
-    {
-        my $serialnumber;
-        my $size;
-
-        # TODO
-        #$volumnMapping{$entry->{canonicalName}} = $entry->{deviceName};
-
-        foreach my $altName (_asArray($entry->{alternateName})) {
-            next unless ref($altName) eq 'HASH';
-            next unless $altName->{namespace};
-            next unless $altName->{data};
-            if ( $altName->{namespace} eq 'SERIALNUM' ) {
-                $serialnumber .= $_ foreach ( @{ $altName->{data} } );
+        controllers = []
+        for device in pci_devices:
+            if not isinstance(device, dict):
+                continue
+            controller = {
+                'NAME': device.get('deviceName', ''),
+                'MANUFACTURER': device.get('vendorName', ''),
+                'PCICLASS': f"{device.get('classId', 0):04x}"[-4:],
+                'VENDORID': f"{device.get('vendorId', 0):04x}"[-4:],
+                'PRODUCTID': f"{device.get('deviceId', 0):04x}"[-4:],
+                'PCISLOT': device.get('id', ''),
             }
-        }
-        if ($entry->{capacity} && $entry->{capacity}->{blockSize} && $entry->{capacity}->{block}) {
-            $size = int(($entry->{capacity}{blockSize} *$entry->{capacity}{block})/1024/1024);
-        }
-        my $manufacturer;
-        if ( $entry->{vendor} && ( $entry->{vendor} !~ /^\s*ATA\s*$/ ) ) {
-            $manufacturer = $entry->{vendor};
-        } else {
-            $manufacturer = getCanonicalManufacturer( $entry->{model} );
-        }
+            sub_vendor_id = device.get('subVendorId')
+            sub_device_id = device.get('subDeviceId')
+            if sub_vendor_id is not None or sub_device_id is not None:
+                controller['PCISUBSYSTEMID'] = f"{sub_vendor_id:04x}[:]{sub_device_id:04x}"[-9:]  # Mimic Perl concat
 
-        $manufacturer =~ s/\s*(\S.*\S)\s*/$1/;
+            controllers.append(controller)
 
-        my $model = $entry->{model};
-        $model =~ s/\s*(\S.*\S)\s*/$1/;
+        return controllers
 
-        push @storages, {
-            DESCRIPTION => $entry->{displayName},
-            DISKSIZE    => $size,
-
-            #        INTERFACE
-            MANUFACTURER => $manufacturer,
-            MODEL        => $model,
-            NAME         => $entry->{deviceName},
-            TYPE         => $entry->{deviceType},
-            SERIAL       => $serialnumber,
-            FIRMWARE     => $entry->{revision},
-
-            #        SCSI_COID
-            #        SCSI_CHID
-            #        SCSI_UNID
-            #        SCSI_LUN
-        };
-
-    }
-
-    return @storages;
-
-}
-
-sub getDrives {
-    my ($self) = @_;
-
-    my @drives;
-
-    foreach (
-        _asArray($self->{hash}[0]{config}{fileSystemVolume}{mountInfo}))
-    {
-        my $volumn;
-        if ( $_->{volume}{type} && ( $_->{volume}{type} =~ /NFS/i ) ) {
-            $volumn = $_->{volume}{remoteHost} . ':' . $_->{volume}{remotePath};
-
-# TODO
-#        } else {
-#            $volumn = $volumnMapping{$_->{volume}{extent}{diskName}}." ".$_->{volume}{extent}{partition};
-        }
-        push @drives,
-          {
-            SERIAL => $_->{volume}{uuid},
-            TOTAL  => int( ( $_->{volume}{capacity} || 0 ) / ( 1000 * 1000 ) ),
-            TYPE   => $_->{mountInfo}{path},
-            VOLUMN => $volumn,
-            LABEL  => $_->{volume}{name},
-            FILESYSTEM => lc( $_->{volume}{type} )
-          };
-    }
-
-    return @drives;
-}
-
-sub getVirtualMachines {
-    my ($self) = @_;
-
-    my @virtualMachines;
-
-    foreach my $vm (@{$self->{vms}}) {
-        my $machine = $vm->[0];
-        my $status =
-            $machine->{summary}{runtime}{powerState} eq 'poweredOn'  ? STATUS_RUNNING :
-            $machine->{summary}{runtime}{powerState} eq 'poweredOff' ? STATUS_OFF     :
-            $machine->{summary}{runtime}{powerState} eq 'suspended'  ? STATUS_PAUSED  :
-                                                                       undef ;
-        print "Unknown status (".$machine->{summary}{runtime}{powerState}.")\n" if !$status;
-
-        my @mac;
-        foreach my $device (_asArray($machine->{config}{hardware}{device})) {
-            push @mac, $device->{macAddress} if $device->{macAddress};
+    def _get_nic(self, ref: Dict[str, Any], is_virtual: bool) -> Dict[str, Any]:
+        nic = {
+            'VIRTUALDEV': is_virtual,
         }
 
-        my $comment = $machine->{config}{annotation};
-
-        # hack to preserve  annotation / comment formating
-        $comment =~ s/\n/&#10;/gm if $comment;
-
-        if (
-            defined($machine->{summary}{config}{template})
-            &&
-            $machine->{summary}{config}{template} eq 'true'
-            ) {
-            next;
+        binding_map = {
+            'DESCRIPTION': 'device',
+            'DRIVER': 'driver',
+            'PCISLOT': 'pci',
+            'MACADDR': 'mac',
         }
 
-        # Compute serialnumber set in bios by ESX
-        my $uuid = $machine->{summary}{config}{uuid};
-        my $vmInventory = {
-            NAME    => $machine->{name},
-            STATUS  => $status,
-            UUID    => $uuid,
-            MEMORY  => $machine->{summary}{config}{memorySizeMB},
-            VMTYPE  => 'VMware',
-            VCPU    => $machine->{summary}{config}{numCpu},
-            MAC     => join( '/', @mac ),
-            COMMENT => $comment
-        };
-        if (is_uuid_string($uuid)) {
-            my @uuid_parts = unpack("A2A2A2A2xA2A2xA2A2xA2A2xA2A2A2A2A2A2", $uuid);
-            $vmInventory->{SERIAL} = "VMware-".join(' ', @uuid_parts[0..7]).'-'.join(' ', @uuid_parts[8..15]);
-        }
+        for key, dump_key in binding_map.items():
+            if dump_key in ref:
+                nic[key] = ref[dump_key]
 
-        # At least Glpi version 10.0.17 will include required schema to validate following fields
-        if ($self->supportGlpiVersion('10.0.17')) {
-            if (ref($machine->{summary}{guest})) {
-                $vmInventory->{IPADDRESS} = $machine->{summary}{guest}{ipAddress}
-                    unless empty($machine->{summary}{guest}{ipAddress});
-                $vmInventory->{OPERATINGSYSTEM}->{FULL_NAME} = $machine->{summary}{guest}{guestFullName}
-                    unless empty($machine->{summary}{guest}{guestFullName});
+        spec = ref.get('spec', {})
+        if spec:
+            ip = spec.get('ip', {})
+            if ip:
+                nic['IPADDRESS'] = ip.get('ipAddress') if 'ipAddress' in ip else ''
+                nic['IPMASK'] = ip.get('subnetMask') if 'subnetMask' in ip else ''
+            if 'MACADDR' not in nic and 'mac' in spec:
+                nic['MACADDR'] = spec['mac']
+            if 'mtu' in spec:
+                nic['MTU'] = spec['mtu']
+            link_speed = spec.get('linkSpeed', {})
+            if 'speedMb' in link_speed:
+                nic['SPEED'] = link_speed['speedMb']
+
+        nic['STATUS'] = 'Up' if nic.get('IPADDRESS') else 'Down'
+
+        return nic
+
+    def get_networks(self) -> List[Dict[str, Any]]:
+        if not self.hash_:
+            return []
+        host = self.hash_[0]
+        config = host.get('config', {})
+        network_config = config.get('network', {})
+
+        seen = {}
+        networks = []
+
+        for nic_type in ['vnic', 'pnic', 'consoleVnic']:
+            nic_entries = self._as_array(network_config.get(nic_type, []))
+            for entry in nic_entries:
+                device = entry.get('device', '')
+                if device in seen:
+                    continue
+                seen[device] = True
+                is_virtual = nic_type == 'vnic'
+                networks.append(self._get_nic(entry, is_virtual))
+
+        vnic_entries = []
+        console_vnic = config.get('network', {}).get('consoleVnic')
+        if console_vnic:
+            vnic_entries.append(console_vnic)
+        vmotion_netconfig = config.get('vmotion', {}).get('netConfig', {})
+        candidate_vnic = vmotion_netconfig.get('candidateVnic')
+        if candidate_vnic:
+            vnic_entries.append(candidate_vnic)
+
+        for entry in vnic_entries:
+            nic_list = self._as_array(entry)
+            for nic_entry in nic_list:
+                device = nic_entry.get('device', '')
+                if device in seen:
+                    continue
+                seen[device] = True
+                networks.append(self._get_nic(nic_entry, True))
+
+        return networks
+
+    def get_storages(self) -> List[Dict[str, Any]]:
+        if not self.hash_:
+            return []
+        scsi_luns = self._as_array(self.hash_[0].get('config', {}).get('storageDevice', {}).get('scsiLun', []))
+
+        storages = []
+        for entry in scsi_luns:
+            if not isinstance(entry, dict):
+                continue
+            serialnumber = ''
+            alt_names = self._as_array(entry.get('alternateName', []))
+            for alt_name in alt_names:
+                if not isinstance(alt_name, dict) or not alt_name.get('namespace') or 'data' not in alt_name:
+                    continue
+                if alt_name['namespace'] == 'SERIALNUM':
+                    serialnumber += ''.join(self._as_array(alt_name['data']))
+
+            capacity = entry.get('capacity', {})
+            size = 0
+            if 'blockSize' in capacity and 'block' in capacity:
+                size = int((capacity['blockSize'] * capacity['block']) / 1024 / 1024)
+
+            vendor = entry.get('vendor', '')
+            manufacturer = vendor if vendor and not re.match(r'^\s*ATA\s*$', vendor) else get_canonical_manufacturer(entry.get('model', ''))
+            manufacturer = re.sub(r'\s*(\S.*\S)\s*', r'\1', manufacturer)
+
+            model = re.sub(r'\s*(\S.*\S)\s*', r'\1', entry.get('model', ''))
+
+            storages.append({
+                'DESCRIPTION': entry.get('displayName', ''),
+                'DISKSIZE': size,
+                'MANUFACTURER': manufacturer,
+                'MODEL': model,
+                'NAME': entry.get('deviceName', ''),
+                'TYPE': entry.get('deviceType', ''),
+                'SERIAL': serialnumber,
+                'FIRMWARE': entry.get('revision', ''),
+            })
+
+        return storages
+
+    def get_drives(self) -> List[Dict[str, Any]]:
+        if not self.hash_:
+            return []
+        mount_infos = self._as_array(self.hash_[0].get('config', {}).get('fileSystemVolume', {}).get('mountInfo', []))
+
+        drives = []
+        for mount_info in mount_infos:
+            if not isinstance(mount_info, dict):
+                continue
+            volume = mount_info.get('volume', {})
+            volumn = ''
+            volume_type = volume.get('type', '')
+            if volume_type and re.search(r'NFS', volume_type, re.I):
+                volumn = f"{volume.get('remoteHost', '')}:{volume.get('remotePath', '')}"
+
+            total = int((volume.get('capacity', 0) or 0) / (1000 * 1000))
+
+            drives.append({
+                'SERIAL': volume.get('uuid', ''),
+                'TOTAL': total,
+                'TYPE': mount_info.get('mountInfo', {}).get('path', ''),
+                'VOLUMN': volumn,
+                'LABEL': volume.get('name', ''),
+                'FILESYSTEM': volume_type.lower() if volume_type else '',
+            })
+
+        return drives
+
+    def get_virtual_machines(self) -> List[Dict[str, Any]]:
+        if not self.vms:
+            return []
+
+        virtual_machines = []
+        for vm in self.vms:
+            if not vm or not isinstance(vm, list) or not vm[0]:
+                continue
+            machine = vm[0]
+            power_state = machine.get('summary', {}).get('runtime', {}).get('powerState', '')
+            status = (
+                STATUS_RUNNING if power_state == 'poweredOn' else
+                STATUS_OFF if power_state == 'poweredOff' else
+                STATUS_PAUSED if power_state == 'suspended' else
+                None
+            )
+            if status is None:
+                print(f"Unknown status ({power_state})")
+
+            macs = []
+            devices = self._as_array(machine.get('config', {}).get('hardware', {}).get('device', []))
+            for device in devices:
+                if isinstance(device, dict) and 'macAddress' in device:
+                    macs.append(device['macAddress'])
+
+            comment = machine.get('config', {}).get('annotation', '')
+            if comment:
+                comment = re.sub(r'\n', '&#10;', comment, flags=re.M)
+
+            if machine.get('summary', {}).get('config', {}).get('template') == 'true':
+                continue
+
+            vm_uuid = machine.get('summary', {}).get('config', {}).get('uuid', '')
+            serial = ''
+            if is_uuid_string(vm_uuid):
+                parts = re.findall(r'[0-9a-fA-F]{2}', vm_uuid)
+                if len(parts) == 16:
+                    first_part = ' '.join(parts[:8])
+                    second_part = ' '.join(parts[8:])
+                    serial = f"VMware-{first_part}-{second_part}"
+
+            vm_inventory = {
+                'NAME': machine.get('name', ''),
+                'STATUS': status,
+                'UUID': vm_uuid,
+                'MEMORY': machine.get('summary', {}).get('config', {}).get('memorySizeMB', 0),
+                'VMTYPE': 'VMware',
+                'VCPU': machine.get('summary', {}).get('config', {}).get('numCpu', 0),
+                'MAC': '/'.join(macs),
+                'COMMENT': comment,
+                'SERIAL': serial,
             }
-            if (ref($machine->{guest})) {
-                $vmInventory->{OPERATINGSYSTEM}->{FQDN} = $machine->{guest}{hostName}
-                    unless empty($machine->{guest}{hostName});
-                if ($machine->{guest}{net}) {
-                    my @guestnet = ref($machine->{guest}{net}) eq 'ARRAY' ?
-                        @{$machine->{guest}{net}} : ($machine->{guest}{net});
-                    foreach my $guestnet (@guestnet) {
-                        next unless ref($guestnet->{dnsConfig});
-                        my $dnsConfig = ref($guestnet->{dnsConfig}) eq 'HASH' ?
-                            $guestnet->{dnsConfig} : $guestnet->{dnsConfig}->[0];
-                        next if ref($dnsConfig) ne 'HASH' || empty($dnsConfig->{domainName});
-                        $vmInventory->{OPERATINGSYSTEM}->{DNS_DOMAIN} = $dnsConfig->{domainName};
-                        last;
-                    }
-                }
-            }
-            unless (empty($machine->{summary}{runtime}{bootTime})) {
-                my ($bootdate, $boottime) =
-                    $machine->{summary}{runtime}{bootTime} =~ /^([0-9-]+).(\d+:\d+:\d+)/;
-                $boottime = "$bootdate $boottime" if $bootdate && $boottime;
-                $vmInventory->{OPERATINGSYSTEM}->{BOOT_TIME} = $boottime if $boottime;
-            }
-        }
 
-        push @virtualMachines, $vmInventory;
-    }
+            if self.support_glpi_version('10.0.17'):
+                summary_guest = machine.get('summary', {}).get('guest', {})
+                if isinstance(summary_guest, dict):
+                    ip_address = summary_guest.get('ipAddress')
+                    if not empty(ip_address):
+                        vm_inventory['IPADDRESS'] = ip_address
+                    guest_full_name = summary_guest.get('guestFullName')
+                    if not empty(guest_full_name):
+                        if 'OPERATINGSYSTEM' not in vm_inventory:
+                            vm_inventory['OPERATINGSYSTEM'] = {}
+                        vm_inventory['OPERATINGSYSTEM']['FULL_NAME'] = guest_full_name
 
-    return @virtualMachines;
-}
+                guest = machine.get('guest', {})
+                if isinstance(guest, dict):
+                    host_name = guest.get('hostName')
+                    if not empty(host_name):
+                        if 'OPERATINGSYSTEM' not in vm_inventory:
+                            vm_inventory['OPERATINGSYSTEM'] = {}
+                        vm_inventory['OPERATINGSYSTEM']['FQDN'] = host_name
 
-1;
+                    guest_net = guest.get('net')
+                    if guest_net:
+                        guest_nets = self._as_array(guest_net)
+                        for gnet in guest_nets:
+                            if not isinstance(gnet, dict) or 'dnsConfig' not in gnet:
+                                continue
+                            dns_config = self._as_array(gnet['dnsConfig'])[0] if isinstance(gnet['dnsConfig'], list) else gnet['dnsConfig']
+                            if isinstance(dns_config, dict) and not empty(dns_config.get('domainName')):
+                                if 'OPERATINGSYSTEM' not in vm_inventory:
+                                    vm_inventory['OPERATINGSYSTEM'] = {}
+                                vm_inventory['OPERATINGSYSTEM']['DNS_DOMAIN'] = dns_config['domainName']
+                                break
 
+                vm_boot_time = machine.get('summary', {}).get('runtime', {}).get('bootTime', '')
+                if not empty(vm_boot_time):
+                    boot_match = re.match(r'^([0-9-]+).(\d+:\d+:\d+)', vm_boot_time)
+                    if boot_match:
+                        bootdate, boottime = boot_match.groups()
+                        boottime = f"{bootdate} {boottime}"
+                        if 'OPERATINGSYSTEM' not in vm_inventory:
+                            vm_inventory['OPERATINGSYSTEM'] = {}
+                        vm_inventory['OPERATINGSYSTEM']['BOOT_TIME'] = boottime
+
+            virtual_machines.append(vm_inventory)
+
+        return virtual_machines
+
+
+def is_uuid_string(uuid_str: str) -> bool:
+    try:
+        return str(uuid_module.UUID(uuid_str)) == uuid_str
+    except ValueError:
+        return False
+
+
+"""
 __END__
 
 =head1 NAME
@@ -521,3 +513,4 @@ Returns the hard drive partitions in an array.
 =head2 getVirtualMachines( $self )
 
 Retuns the Virtual Machines in an array.
+"""

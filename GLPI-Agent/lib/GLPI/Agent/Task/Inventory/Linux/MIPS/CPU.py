@@ -1,46 +1,43 @@
-package GLPI::Agent::Task::Inventory::Linux::MIPS::CPU;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Linux MIPS CPU - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any, List, Dict
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import has_file
+from GLPI.Agent.Tools.Linux import get_cpus_from_proc
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Linux;
 
-use constant    category    => "cpu";
-
-sub isEnabled {
-    return has_file('/proc/cpuinfo');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    foreach my $cpu (_getCPUsFromProc(
-        logger => $logger, file => '/proc/cpuinfo'
-    )) {
-        $inventory->addEntry(
-            section => 'CPUS',
-            entry   => $cpu
-        );
-    }
-}
-
-sub _getCPUsFromProc {
-    my @cpus;
-    foreach my $cpu (getCPUsFromProc(@_)) {
-
-       push @cpus, {
-            ARCH => 'mips',
-            NAME => $cpu->{'cpu model'},
-        };
-    }
-
-    return @cpus;
-}
-
-1;
+class CPU(InventoryModule):
+    """MIPS CPU detection module."""
+    
+    category = "cpu"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return has_file('/proc/cpuinfo')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        for cpu in CPU._get_cpus_from_proc(logger=logger, file='/proc/cpuinfo'):
+            if inventory:
+                inventory.add_entry(section='CPUS', entry=cpu)
+    
+    @staticmethod
+    def _get_cpus_from_proc(**params) -> List[Dict[str, Any]]:
+        """Parse MIPS CPU information from /proc/cpuinfo."""
+        cpus = []
+        for cpu in get_cpus_from_proc(**params):
+            cpus.append({
+                'ARCH': 'mips',
+                'NAME': cpu.get('cpu model'),
+            })
+        
+        return cpus

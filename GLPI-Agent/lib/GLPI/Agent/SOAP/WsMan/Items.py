@@ -1,17 +1,13 @@
-package GLPI::Agent::SOAP::WsMan::Items;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
+class Items(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::Items
+    WSMan Items node handling.
+    """
+    xmlns = 'w'
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    Items;
-
-use parent
-    'Node';
-
-use constant    xmlns   => 'w';
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.

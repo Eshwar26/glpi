@@ -1,37 +1,41 @@
-package GLPI::Agent::Task::Inventory::HPUX::OS;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory HPUX OS - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import Uname, get_root_fs_birth
 
-use GLPI::Agent::Tools;
 
-use constant    category    => "os";
-
-sub isEnabled {
-    return 1;
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-
-    # Operating system informations
-    my $kernelRelease = Uname("-r");
-
-    my $os = {
-        NAME           => 'HP-UX',
-        VERSION        => $kernelRelease,
-        KERNEL_VERSION => $kernelRelease,
-    };
-
-    my $installdate = getRootFSBirth(%params);
-    $os->{INSTALL_DATE} = $installdate
-        if $installdate;
-
-    $inventory->setOperatingSystem($os);
-}
-
-1;
+class OS(InventoryModule):
+    """HP-UX OS information detection module."""
+    
+    category = "os"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return True
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        
+        # Operating system information
+        kernel_release = Uname('-r')
+        
+        os = {
+            'NAME': 'HP-UX',
+            'VERSION': kernel_release,
+            'KERNEL_VERSION': kernel_release,
+        }
+        
+        installdate = get_root_fs_birth(**params)
+        if installdate:
+            os['INSTALL_DATE'] = installdate
+        
+        if inventory:
+            inventory.set_operating_system(os)

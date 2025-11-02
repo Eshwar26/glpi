@@ -1,108 +1,110 @@
-package GLPI::Agent::Task::Inventory::Virtualization::Qemu;
-# With Qemu 0.10.X, some option will be added to get more and easly information (UUID, memory, ...)
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Virtualization Qemu - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any, Dict, List, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
-
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Unix;
-use GLPI::Agent::Tools::Virtualization;
-
-sub isEnabled {
-    # Avoid duplicated entry with libvirt
-    return if canRun('virsh');
-
-    return
-        canRun('qemu') ||
-        canRun('kvm')  ||
-        canRun('qemu-kvm');
-}
-
-sub _parseProcessList {
-    my ($process) = @_;
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import get_all_lines, can_run
+from GLPI.Agent.Tools.Virtualization import STATUS_RUNNING
+from GLPI.Agent.Tools import get_canonical_size
 
 
-    my $values = {};
+class Qemu(InventoryModule):
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        # Avoid duplicated entry with libvirt
+        if can_run('virsh'):
+            return False
+        return can_run('qemu') or can_run('kvm') or can_run('qemu-kvm')
 
-    my @options = split (/ -/, $process->{CMD});
+    @staticmethod
+    def _parse_process(cmd: str) -> Optional[Dict[str, Any]]:
+        values: Dict[str, Any] = {}
 
-    my $cmd = shift @options;
-    if ($cmd =~ m/^(?:\/usr\/(s?)bin\/)?(\S+)/) {
-        $values->{vmtype} = $2 =~ /kvm/ ? "kvm" : "qemu";
-    }
+        # Split options on ' -'
+        parts = cmd.split(' -')
+        if not parts:
+            return None
+        first = parts.pop(0)
 
-    foreach my $option (@options) {
-        if ($option =~ m/^(?:[fhsv]d[a-d]|cdrom) (\S+)/) {
-            $values->{name} = $1 if !$values->{name};
-        } elsif ($option =~ m/^name ([^\s,]+)/) {
-            $values->{name} = $1;
-        } elsif ($option =~ m/^m .*size=(\S+)/) {
-            my ($mem) = split(/,/,$1);
-            $values->{mem} = getCanonicalSize($mem);
-        } elsif ($option =~ m/^m (\S+)/) {
-            $values->{mem} = getCanonicalSize($1);
-        } elsif ($option =~ m/^uuid (\S+)/) {
-            $values->{uuid} = $1;
-        } elsif ($option =~ m/^enable-kvm/) {
-            $values->{vmtype} = "kvm";
-        }
+        import re
+        m = re.match(r'^(?:/usr/(s?)bin/)?(\S+)', first)
+        if m:
+            values['vmtype'] = 'kvm' if 'kvm' in m.group(2) else 'qemu'
 
-        if ($option =~ /smbios/) {
-            if ($option =~ m/smbios.*uuid=([a-zA-Z0-9-]+)/) {
-                $values->{uuid} = $1;
-            }
-            if ($option =~ m/smbios.*serial=([a-zA-Z0-9-]+)/) {
-                $values->{serial} = $1;
-            }
-        }
-    }
+        for option in parts:
+            if re.match(r'^(?:[fhsv]d[a-d]|cdrom) (\S+)', option):
+                if 'name' not in values:
+                    values['name'] = re.sub(r'^(?:[fhsv]d[a-d]|cdrom)\s+', '', option).split()[0]
+            elif re.match(r'^name ([^\s,]+)', option):
+                values['name'] = re.sub(r'^name\s+', '', option).split(',')[0]
+            elif re.match(r'^m .*size=(\S+)', option):
+                mem = re.sub(r'^m .*size=', '', option).split(',', 1)[0]
+                values['mem'] = get_canonical_size(mem)
+            elif re.match(r'^m (\S+)', option):
+                mem = re.sub(r'^m\s+', '', option)
+                values['mem'] = get_canonical_size(mem)
+            elif re.match(r'^uuid (\S+)', option):
+                values['uuid'] = option.split()[1]
+            elif re.match(r'^enable-kvm', option):
+                values['vmtype'] = 'kvm'
 
-    if (defined($values->{mem}) && $values->{mem} =~ /^0+$/) {
-        # Default value
-        $values->{mem} = 128;
-    }
+            if 'smbios' in option:
+                mu = re.search(r'smbios.*uuid=([a-zA-Z0-9-]+)', option)
+                if mu:
+                    values['uuid'] = mu.group(1)
+                ms = re.search(r'smbios.*serial=([a-zA-Z0-9-]+)', option)
+                if ms:
+                    values['serial'] = ms.group(1)
 
-    return $values;
-}
+        if 'mem' in values and isinstance(values['mem'], str) and values['mem'].isdigit() and int(values['mem']) == 0:
+            values['mem'] = 128
 
-sub doInventory {
-    my (%params) = @_;
+        return values
 
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        inventory = params.get('inventory')
+        logger = params.get('logger')
 
-    # check only qemu instances
-    foreach my $process (getProcesses(
-        filter    => qr/(qemu|kvm|qemu-kvm|qemu-system\S+) .*\S/x,
-        namespace => "same",
-        logger    => $logger,
-    )) {
+        # Fetch processes lines. We approximate getProcesses by using ps output.
+        # We filter with regex similar to Perl filter
+        lines = get_all_lines(
+            command="ps -eo pid,command | grep -E '(qemu|kvm|qemu-kvm|qemu-system\\S+).*\\S' | grep -v grep",
+            logger=logger,
+        ) or []
 
-        # Don't inventory qemu guest agent as a virtualmachine
-        next if $process->{CMD} =~ /qemu-ga/;
+        for line in lines:
+            # Extract the command part after PID
+            parts = line.split(None, 1)
+            if len(parts) < 2:
+                continue
+            cmd = parts[1]
 
-        my $values = _parseProcessList($process);
-        next unless $values;
+            # Skip qemu guest agent
+            if 'qemu-ga' in cmd:
+                continue
 
-        # Name is mandatory, if we don't see it, the process is probably not related to a VM
-        next unless defined($values->{name}) && length($values->{name});
+            values = Qemu._parse_process(cmd)
+            if not values:
+                continue
+            if not values.get('name'):
+                continue
 
-        $inventory->addEntry(
-            section => 'VIRTUALMACHINES',
-            entry => {
-                NAME      => $values->{name},
-                UUID      => $values->{uuid},
-                VCPU      => 1,
-                MEMORY    => $values->{mem},
-                STATUS    => STATUS_RUNNING,
-                SUBSYSTEM => $values->{vmtype},
-                VMTYPE    => $values->{vmtype},
-                SERIAL    => $values->{serial},
-            }
-        );
-    }
-}
+            if inventory:
+                inventory.add_entry(
+                    section='VIRTUALMACHINES',
+                    entry={
+                        'NAME': values.get('name'),
+                        'UUID': values.get('uuid'),
+                        'VCPU': 1,
+                        'MEMORY': values.get('mem'),
+                        'STATUS': STATUS_RUNNING,
+                        'SUBSYSTEM': values.get('vmtype'),
+                        'VMTYPE': values.get('vmtype'),
+                        'SERIAL': values.get('serial'),
+                    },
+                )
 
-1;

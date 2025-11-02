@@ -1,36 +1,48 @@
-package GLPI::Agent::Task::Inventory::Linux::Memory;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Linux Memory - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_read, get_all_lines, first
 
-use GLPI::Agent::Tools;
 
-use constant    category    => "memory";
-
-sub isEnabled {
-    return canRead('/proc/meminfo');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-
-    my @lines = getAllLines(
-        file    => '/proc/meminfo',
-        logger  => $params{logger}
-    );
-
-    my $memoryLine = first { /^MemTotal:\s*(\d+)/ } @lines;
-    my $swapLine = first { /^SwapTotal:\s*(\d+)/ } @lines;
-
-    my $hw;
-    $hw->{MEMORY} = int($1/1024) if $memoryLine && $memoryLine =~ /(\d+)/;
-    $hw->{SWAP}   = int($1/1024) if $swapLine   && $swapLine   =~ /(\d+)/;
-
-    $inventory->setHardware($hw);
-}
-
-1;
+class Memory(InventoryModule):
+    """Linux memory detection module."""
+    
+    category = "memory"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_read('/proc/meminfo')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        
+        lines = get_all_lines(
+            file='/proc/meminfo',
+            logger=params.get('logger')
+        )
+        
+        memory_line = first(lambda l: re.match(r'^MemTotal:\s*(\d+)', l), lines)
+        swap_line = first(lambda l: re.match(r'^SwapTotal:\s*(\d+)', l), lines)
+        
+        hw = {}
+        if memory_line:
+            match = re.search(r'(\d+)', memory_line)
+            if match:
+                hw['MEMORY'] = int(int(match.group(1)) / 1024)
+        
+        if swap_line:
+            match = re.search(r'(\d+)', swap_line)
+            if match:
+                hw['SWAP'] = int(int(match.group(1)) / 1024)
+        
+        if inventory:
+            inventory.set_hardware(hw)

@@ -1,23 +1,21 @@
-package GLPI::Agent::SOAP::WsMan::ResourceCreated;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
+class ResourceCreated(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::ResourceCreated
+    WSMan ResourceCreated node handling.
+    """
+    xmlns = 'x'
 
-use GLPI::Agent::SOAP::WsMan::Node;
+    @classmethod
+    def support(cls):
+        """
+        Returns the supported reference parameters mapping.
 
-## no critic (ProhibitMultiplePackages)
-package
-    ResourceCreated;
-
-use parent
-    'Node';
-
-use constant xmlns  => 'x';
-
-sub support {
-    return {
-        ReferenceParameters => "a:ReferenceParameters",
-    };
-}
-
-1;
+        Returns:
+            dict: Mapping of supported reference parameters.
+        """
+        return {
+            'ReferenceParameters': 'a:ReferenceParameters',
+        }

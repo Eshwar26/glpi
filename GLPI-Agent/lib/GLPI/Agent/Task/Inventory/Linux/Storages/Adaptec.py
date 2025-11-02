@@ -1,100 +1,103 @@
-package GLPI::Agent::Task::Inventory::Linux::Storages::Adaptec;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Linux Storages Adaptec - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, List, Dict
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_read, get_all_lines, get_canonical_manufacturer
+from GLPI.Agent.Tools.Linux import get_devices_from_udev, get_info_from_smartctl
 
-use English qw(-no_match_vars);
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Linux;
-
-our $runMeIfTheseChecksFailed = ['GLPI::Agent::Task::Inventory::Linux::Storages'];
-
-sub isEnabled {
-    return canRead('/proc/scsi/scsi');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my @devices = getDevicesFromUdev(logger => $logger);
-
-    foreach my $device (@devices) {
-        next unless $device->{MANUFACTURER};
-        next unless
-            $device->{MANUFACTURER} eq 'Adaptec' ||
-            $device->{MANUFACTURER} eq 'Sun'     ||
-            $device->{MANUFACTURER} eq 'ServeRA';
-
-        foreach my $disk (_getDisksFromProc(
-                controller => 'scsi' . $device->{SCSI_COID},
-                name       => $device->{NAME},
-                logger     => $logger
-        )) {
-            # merge with smartctl info
-            my $info = getInfoFromSmartctl(device => $disk->{device});
-            next unless $info->{TYPE} =~ /disk/i;
-            foreach my $key (qw/SERIALNUMBER DESCRIPTION TYPE DISKSIZE MANUFACTURER/) {
-                $disk->{$key} = $info->{$key};
-            }
-            delete $disk->{device};
-            $inventory->addEntry(section => 'STORAGES', entry => $disk);
-        }
-    }
-}
-
-sub _getDisksFromProc {
-    my (%params) = (
-        file => '/proc/scsi/scsi',
-        @_
-    );
-
-    return unless $params{controller};
-
-    my @lines = getAllLines(%params)
-        or return;
-
-    my @disks;
-    my $disk;
-
-    my $count = -1;
-    foreach my $line (@lines) {
-        if ($line =~ /^Host: (\w+)/) {
-            $count++;
-            if ($1 eq $params{controller}) {
-                # that's the controller we're looking for
-                $disk = {
-                    NAME        => $params{name},
-                };
-            } else {
-                # that's another controller
-                undef $disk;
-            }
-        }
-
-        if ($line =~ /Model: \s (\S.+\S) \s+ Rev: \s (\S+)/x) {
-            next unless $disk;
-            $disk->{MODEL}    = $1;
-            $disk->{FIRMWARE} = $2;
-
-            # that's the controller itself, not a disk
-            next if $disk->{MODEL} =~ /raid|virtual/i;
-
-            $disk->{MANUFACTURER} = getCanonicalManufacturer(
-                $disk->{MODEL}
-            );
-            $disk->{device} = "/dev/sg$count";
-
-            push @disks, $disk;
-        }
-    }
-
-    return @disks;
-}
-
-1;
+class Adaptec(InventoryModule):
+    """Adaptec RAID controller inventory."""
+    
+    runMeIfTheseChecksFailed = ['GLPI::Agent::Task::Inventory::Linux::Storages']
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_read('/proc/scsi/scsi')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        devices = get_devices_from_udev(logger=logger)
+        
+        for device in devices:
+            if not device.get('MANUFACTURER'):
+                continue
+            if device['MANUFACTURER'] not in ['Adaptec', 'Sun', 'ServeRA']:
+                continue
+            
+            for disk in Adaptec._get_disks_from_proc(
+                controller=f"scsi{device.get('SCSI_COID', '')}",
+                name=device.get('NAME', ''),
+                logger=logger
+            ):
+                # merge with smartctl info
+                info = get_info_from_smartctl(device=disk.get('device'))
+                if not info.get('TYPE') or 'disk' not in info['TYPE'].lower():
+                    continue
+                
+                for key in ['SERIALNUMBER', 'DESCRIPTION', 'TYPE', 'DISKSIZE', 'MANUFACTURER']:
+                    if key in info:
+                        disk[key] = info[key]
+                
+                if 'device' in disk:
+                    del disk['device']
+                
+                if inventory:
+                    inventory.add_entry(section='STORAGES', entry=disk)
+    
+    @staticmethod
+    def _get_disks_from_proc(**params) -> List[Dict[str, Any]]:
+        """Get disks from /proc/scsi/scsi."""
+        if 'file' not in params:
+            params['file'] = '/proc/scsi/scsi'
+        
+        controller = params.get('controller')
+        if not controller:
+            return []
+        
+        lines = get_all_lines(**params)
+        if not lines:
+            return []
+        
+        disks = []
+        disk = None
+        count = -1
+        
+        for line in lines:
+            host_match = re.match(r'^Host: (\w+)', line)
+            if host_match:
+                count += 1
+                if host_match.group(1) == controller:
+                    # that's the controller we're looking for
+                    disk = {
+                        'NAME': params.get('name', ''),
+                    }
+                else:
+                    # that's another controller
+                    disk = None
+            
+            model_match = re.match(r'Model: \s (\S.+\S) \s+ Rev: \s (\S+)', line, re.VERBOSE)
+            if model_match and disk is not None:
+                disk['MODEL'] = model_match.group(1)
+                disk['FIRMWARE'] = model_match.group(2)
+                
+                # that's the controller itself, not a disk
+                if re.search(r'raid|virtual', disk['MODEL'], re.IGNORECASE):
+                    continue
+                
+                disk['MANUFACTURER'] = get_canonical_manufacturer(disk['MODEL'])
+                disk['device'] = f'/dev/sg{count}'
+                
+                disks.append(disk)
+        
+        return disks

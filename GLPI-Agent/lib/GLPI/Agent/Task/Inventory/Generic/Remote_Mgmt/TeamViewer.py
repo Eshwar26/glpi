@@ -1,148 +1,148 @@
-package GLPI::Agent::Task::Inventory::Generic::Remote_Mgmt::TeamViewer;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Generic Remote_Mgmt TeamViewer - Python Implementation
+"""
 
-use strict;
-use warnings;
+import platform
+import re
+from typing import Any, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_first_line, get_first_match, hex2dec, glob_files
 
-use English qw(-no_match_vars);
 
-use GLPI::Agent::Tools;
-
-sub isEnabled {
-    my (%params) = @_;
-
-    if (OSNAME eq 'MSWin32') {
-
-        GLPI::Agent::Tools::Win32->use();
-
-        # Depending on the installation the teamviewer key can be in two place in X64 OS
-
-        my $key = getRegistryKey(
-            path => "HKEY_LOCAL_MACHINE/SOFTWARE/TeamViewer",
-            # Important for remote inventory optimization
-            required    => [ qw/ClientID/ ],
-            maxdepth    => 1,
-            logger => $params{logger}
-        );
-        if (!$key && is64bit()) {
-            $key = getRegistryKey(
-                path => "HKEY_LOCAL_MACHINE/SOFTWARE/Wow6432Node/TeamViewer",
-                # Important for remote inventory optimization
-                required    => [ qw/ClientID/ ],
-                maxdepth    => 1,
-                logger => $params{logger}
-            );
-        }
-
-        return $key && (keys %$key);
-    } elsif (OSNAME eq 'darwin') {
-        return canRun('defaults') && Glob(
+class TeamViewer(InventoryModule):
+    """TeamViewer remote management inventory module."""
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        osname = platform.system()
+        logger = params.get('logger')
+        
+        if osname == 'Windows':
+            from GLPI.Agent.Tools.Win32 import get_registry_key, is64bit
+            
+            key = get_registry_key(
+                path='HKEY_LOCAL_MACHINE/SOFTWARE/TeamViewer',
+                required=['ClientID'],
+                maxdepth=1,
+                logger=logger
+            )
+            if not key and is64bit():
+                key = get_registry_key(
+                    path='HKEY_LOCAL_MACHINE/SOFTWARE/Wow6432Node/TeamViewer',
+                    required=['ClientID'],
+                    maxdepth=1,
+                    logger=logger
+                )
+            
+            return bool(key and len(key) > 0)
+        
+        elif osname == 'Darwin':
+            return can_run('defaults') and bool(glob_files(
+                "/Library/Preferences/com.teamviewer.teamviewer*.plist"
+            ))
+        
+        return can_run('teamviewer')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        teamviewer_id = TeamViewer._get_id(
+            osname=platform.system(),
+            logger=logger
+        )
+        
+        if teamviewer_id:
+            if logger:
+                logger.debug(f'Found TeamViewerID : {teamviewer_id}')
+            
+            if inventory:
+                inventory.add_entry(
+                    section='REMOTE_MGMT',
+                    entry={
+                        'ID': teamviewer_id,
+                        'TYPE': 'teamviewer'
+                    }
+                )
+        else:
+            if logger:
+                logger.debug('TeamViewerID not found')
+    
+    @staticmethod
+    def _get_id(**params) -> Optional[str]:
+        """Get TeamViewer ID based on OS."""
+        osname = params.pop('osname', '')
+        
+        if osname == 'Windows':
+            return TeamViewer._get_id_mswin32()
+        elif osname == 'Darwin':
+            return TeamViewer._get_id_darwin(**params)
+        
+        return TeamViewer._get_id_teamviewer_info(**params)
+    
+    @staticmethod
+    def _get_id_mswin32() -> Optional[str]:
+        """Get TeamViewer ID from Windows registry."""
+        from GLPI.Agent.Tools.Win32 import get_registry_value, get_registry_key, is64bit
+        
+        clientid = get_registry_value(
+            path='HKEY_LOCAL_MACHINE/SOFTWARE/TeamViewer/ClientID'
+        )
+        if not clientid and is64bit():
+            clientid = get_registry_value(
+                path='HKEY_LOCAL_MACHINE/SOFTWARE/Wow6432Node/TeamViewer/ClientID'
+            )
+        
+        if not clientid:
+            teamviewer_reg = get_registry_key(
+                path='HKEY_LOCAL_MACHINE/SOFTWARE/TeamViewer',
+                required=['ClientID']
+            )
+            if not teamviewer_reg and is64bit():
+                teamviewer_reg = get_registry_key(
+                    path='HKEY_LOCAL_MACHINE/SOFTWARE/Wow6432Node/TeamViewer',
+                    required=['ClientID']
+                )
+            
+            if not teamviewer_reg:
+                return None
+            
+            # Look for subkey beginning with Version
+            for key in teamviewer_reg.keys():
+                if re.match(r'^Version\d+/', key):
+                    clientid = teamviewer_reg[key].get('/ClientID')
+                    if clientid:
+                        break
+        
+        return hex2dec(clientid) if clientid else None
+    
+    @staticmethod
+    def _get_id_darwin(**params) -> Optional[str]:
+        """Get TeamViewer ID from macOS plist."""
+        plist_files = params.get('darwin_glob') or glob_files(
             "/Library/Preferences/com.teamviewer.teamviewer*.plist"
-        );
-    }
-
-    return canRun('teamviewer');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $teamViewerID = _getID(
-        osname  => OSNAME,
-        logger  => $logger
-    );
-    if (defined($teamViewerID)) {
-        $logger->debug('Found TeamViewerID : ' . $teamViewerID) if ($logger);
-
-        $inventory->addEntry(
-            section => 'REMOTE_MGMT',
-            entry   => {
-                ID   => $teamViewerID,
-                TYPE => 'teamviewer'
-            }
-        );
-    } else {
-        $logger->debug('TeamViewerID not found') if ($logger);
-    }
-}
-
-sub _getID {
-    my (%params) = @_;
-
-    my $osname = delete $params{osname} // '';
-
-    return _getID_MSWin32() if $osname eq "MSWin32";
-    return _getID_darwin(%params)  if $osname eq "darwin";
-
-    return _getID_teamviewer_info(%params);
-}
-
-sub _getID_MSWin32 {
-
-    GLPI::Agent::Tools::Win32->use();
-
-    my $clientid = getRegistryValue(
-        path => "HKEY_LOCAL_MACHINE/SOFTWARE/TeamViewer/ClientID",
-    );
-    if (!$clientid && is64bit()) {
-        $clientid = getRegistryValue(
-            path => "HKEY_LOCAL_MACHINE/SOFTWARE/Wow6432Node/TeamViewer/ClientID",
-        );
-    }
-
-    unless ($clientid) {
-        my $teamviever_reg = getRegistryKey(
-            path => "HKEY_LOCAL_MACHINE/SOFTWARE/TeamViewer",
-            # Important for remote inventory optimization
-            required    => [ qw/ClientID/ ],
-        );
-        if(!$teamviever_reg && is64bit()){
-            $teamviever_reg = getRegistryKey(
-                path => "HKEY_LOCAL_MACHINE/SOFTWARE/Wow6432Node/TeamViewer",
-                # Important for remote inventory optimization
-                required    => [ qw/ClientID/ ],
-            );
-        }
-
-        return unless $teamviever_reg;
-
-        # Look for subkey beginning with Version
-        foreach my $key (keys(%{$teamviever_reg})) {
-            next unless $key =~ /^Version\d+\//;
-            $clientid = $teamviever_reg->{$key}->{"/ClientID"};
-            last if (defined($clientid));
-        }
-    }
-
-    return hex2dec($clientid);
-}
-
-sub _getID_darwin {
-    my (%params) = @_;
-
-    # Use $params{darwin_glob} & $params{file} for tests
-    my ( $plist_file ) = $params{darwin_glob} || Glob(
-        "/Library/Preferences/com.teamviewer.teamviewer*.plist"
-    );
-
-    return getFirstLine(
-        command => "defaults read $plist_file ClientID",
-        %params
-    );
-}
-
-sub _getID_teamviewer_info {
-    my (%params) = @_;
-
-    return getFirstMatch(
-        command => "teamviewer --info",
-        pattern => qr/TeamViewer ID:(?:\033\[0m|\s)*(\d+)/,
-        %params
-    );
-}
-
-1;
+        )
+        
+        if not plist_files:
+            return None
+        
+        plist_file = plist_files[0]
+        
+        return get_first_line(
+            command=f'defaults read {plist_file} ClientID',
+            **params
+        )
+    
+    @staticmethod
+    def _get_id_teamviewer_info(**params) -> Optional[str]:
+        """Get TeamViewer ID from teamviewer --info command."""
+        return get_first_match(
+            command='teamviewer --info',
+            pattern=r'TeamViewer ID:(?:\033\[0m|\s)*(\d+)',
+            **params
+        )

@@ -1,108 +1,118 @@
-package GLPI::Agent::Task::Inventory::Virtualization::SolarisZones;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Virtualization Solaris Zones - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, Dict, List, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import (
+    can_run,
+    get_all_lines,
+    get_first_line,
+    get_first_match,
+    empty,
+)
+from GLPI.Agent.XML import XML
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Solaris;
-use GLPI::Agent::XML;
 
-sub isEnabled {
-    return
-        canRun('zoneadm') &&
-        getZone() eq 'global' &&
-        _check_solaris_valid_release();
-}
+class SolarisZones(InventoryModule):
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        # Requires Solaris-specific helpers; we approximate getZone by /sbin/zonename
+        if not can_run('zoneadm'):
+            return False
+        zonename = get_first_line(command='/usr/bin/zonename')
+        if zonename != 'global':
+            return False
+        return SolarisZones._check_solaris_valid_release()
 
-sub doInventory {
-    my (%params) = @_;
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        inventory = params.get('inventory')
+        logger = params.get('logger')
 
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
+        zones = get_all_lines(command='/usr/sbin/zoneadm list -ip', logger=logger) or []
+        for zone in zones:
+            parts = zone.split(':')
+            if len(parts) < 6:
+                continue
+            zoneid, zonename, zonestatus, _, uuid, zonebrand = parts[:6]
+            if zonename == 'global':
+                continue
 
-    my @zones =
-        getAllLines(command => '/usr/sbin/zoneadm list -ip', logger => $logger);
+            zonestatus = 'off' if zonestatus == 'installed' else zonestatus
+            zonebrand = 'Solaris Zones' if (not zonebrand or empty(zonebrand)) else zonebrand
 
-    foreach my $zone (@zones) {
-        my ($zoneid, $zonename, $zonestatus, undef, $uuid, $zonebrand) = split(/:/, $zone);
-        next if $zonename eq 'global';
+            zonefile = f'/etc/zones/{zonename}.xml'
 
-        $zonestatus = "off" if $zonestatus eq "installed";
-        $zonebrand = "Solaris Zones" if empty($zonebrand);
+            memory = None
+            vcpu = get_first_match(
+                command='/usr/sbin/psrinfo -p -v',
+                pattern=r'The physical processor has \d+ cores and (\d+) virtual processors',
+                logger=logger,
+            )
 
-        # Memory considerations depends on rcapd or project definitions
-        # Little hack, I go directly in /etc/zones reading mcap physcap for each zone.
-        my $zonefile = "/etc/zones/$zonename.xml";
+            zone_xml_lines = get_all_lines(file=zonefile)
+            config = None
+            if zone_xml_lines:
+                config = XML(string='\n'.join(zone_xml_lines), force_array=['rctl']).dump_as_hash()
 
-        my ($memory, $vcpu);
-        $vcpu = getFirstMatch(
-            command => '/usr/sbin/psrinfo -p -v',
-            pattern => qr/The physical processor has \d+ cores and (\d+) virtual processors/,
-            logger  => $logger
-        );
+            if config and isinstance(config.get('zone', {}).get('rctl'), list):
+                for name in ['zone.max-locked-memory', 'zone.max-physical-memory']:
+                    conf = next((r for r in config['zone']['rctl'] if r.get('-name') == name), None)
+                    if conf and conf.get('rctl-value') and conf['rctl-value'].get('-limit'):
+                        limit = conf['rctl-value']['-limit']
+                        from GLPI.Agent.Tools import get_canonical_size as _gcs
+                        memory = _gcs(f'{limit}bytes', 1024)
+                    if memory:
+                        break
+                cpucap = next((r for r in config['zone']['rctl'] if r.get('-name') == 'zone.cpu-cap'), None)
+                if cpucap and cpucap.get('rctl-value') and cpucap['rctl-value'].get('-limit'):
+                    try:
+                        vcpu = int(int(cpucap['rctl-value']['-limit']) / 100)
+                    except Exception:
+                        pass
+            else:
+                line = get_first_match(file=zonefile, pattern=r'(.*mcap.*)', logger=logger)
+                if line:
+                    memcap = re.sub(r'[^\d]+', '', line)
+                    try:
+                        memory = int(memcap) / 1024 / 1024
+                    except Exception:
+                        memory = None
+                if not vcpu:
+                    vcpu = get_first_line(command='/usr/sbin/psrinfo -p', logger=logger)
 
-        # Read xml config on OmniOS to discover memory and cpu cap
-        my $zone = getAllLines(file => $zonefile);
-        my $config = GLPI::Agent::XML->new(string => $zone, force_array => [ qw(rctl) ])->dump_as_hash();
-        if ($config && $config->{zone} && ref($config->{zone}->{rctl}) eq 'ARRAY') {
-            foreach my $name (qw(zone.max-locked-memory zone.max-physical-memory)) {
-                my ($conf) = first { $_->{'-name'} eq $name } @{$config->{zone}->{rctl}}
-                    or next;
-                $memory = getCanonicalSize($conf->{'rctl-value'}->{'-limit'} . "bytes", 1024)
-                    if $conf->{'rctl-value'} && $conf->{'rctl-value'}->{'-limit'};
-                last if $memory;
-            }
+            if inventory:
+                inventory.add_entry(
+                    section='VIRTUALMACHINES',
+                    entry={
+                        'MEMORY': memory,
+                        'NAME': zonename,
+                        'UUID': uuid,
+                        'STATUS': zonestatus,
+                        'SUBSYSTEM': zonebrand,
+                        'VMTYPE': 'Solaris Zones',
+                        'VCPU': vcpu,
+                    },
+                )
 
-            my ($cpucap) = first { $_->{'-name'} eq "zone.cpu-cap" } @{$config->{zone}->{rctl}};
-            $vcpu = int($cpucap->{'rctl-value'}->{'-limit'}/100)
-                if $cpucap && $cpucap->{'rctl-value'} && $cpucap->{'rctl-value'}->{'-limit'};
+    @staticmethod
+    def _check_solaris_valid_release() -> bool:
+        # Approximate: parse /etc/release for 10 8/07+ or >10
+        rel = get_all_lines(file='/etc/release') or []
+        text = '\n'.join(rel)
+        m = re.search(r'Solaris\s+(\d+)', text)
+        if not m:
+            return False
+        version = int(m.group(1))
+        if version > 10:
+            return True
+        if version == 10:
+            # Look for subversion like s10_?? or 8/07 or later
+            if re.search(r'(?:08/07|\b10\b|11/06|\b2007\b|\b2008\b|\b2009\b|\b2010\b)', text):
+                return True
+        return False
 
-        } else {
-            my $line = getFirstMatch(
-                file    => $zonefile,
-                pattern => qr/(.*mcap.*)/,
-                logger  => $logger
-            );
-
-            if ($line) {
-                my $memcap = $line;
-                $memcap =~ s/[^\d]+//g;
-                $memory = $memcap / 1024 / 1024;
-            }
-
-            # Use old command to set vcpu if not found before
-            $vcpu = getFirstLine(command => '/usr/sbin/psrinfo -p', logger => $logger)
-                unless $vcpu;
-        }
-
-        $inventory->addEntry(
-            section => 'VIRTUALMACHINES',
-            entry => {
-                MEMORY    => $memory,
-                NAME      => $zonename,
-                UUID      => $uuid,
-                STATUS    => $zonestatus,
-                SUBSYSTEM => $zonebrand,
-                VMTYPE    => "Solaris Zones",
-                VCPU      => $vcpu,
-            }
-        );
-    }
-}
-
-# check if Solaris 10 release is higher than 08/07
-sub _check_solaris_valid_release{
-
-    my $info = getReleaseInfo();
-    my ($version) = $info->{version} =~ /^(\d+)/;
-    return
-        $version > 10
-        ||
-        $version == 10         &&
-        $info->{subversion}    &&
-        substr($info->{subversion}, 1) >= 4;
-}
-
-1;

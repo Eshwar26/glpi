@@ -1,58 +1,61 @@
-package GLPI::Agent::Task::Inventory::Virtualization::Jails;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Virtualization Jails - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any, List, Dict
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_all_lines
+from GLPI.Agent.Tools.Virtualization import STATUS_RUNNING
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Virtualization;
 
-sub isEnabled {
-    return canRun('jls');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    foreach my $machine (_getVirtualMachines(logger => $logger)) {
-        $inventory->addEntry(
-            section => 'VIRTUALMACHINES', entry => $machine
-        );
-    }
-}
-
-sub  _getVirtualMachines {
-    my (%params) = (
-        command => 'jls -n',
-        @_
-    );
-
-    my @lines = getAllLines(%params)
-        or return;
-
-    my @machines;
-    foreach my $line (@lines) {
-        my $info;
-        foreach my $item (split(' ', $line)) {
-            next unless $item =~ /(\S+)=(\S+)/;
-            $info->{$1} = $2;
-        }
-
-        my $machine = {
-            VMTYPE    => 'bsdjail',
-            NAME      => $info->{'host.hostname'},
-            STATUS    => STATUS_RUNNING
-        };
-
-        push @machines, $machine;
-
-    }
-
-    return @machines;
-}
-
-1;
+class Jails(InventoryModule):
+    """BSD Jails detection module."""
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('jls')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        for machine in Jails._get_virtual_machines(logger=logger):
+            if inventory:
+                inventory.add_entry(
+                    section='VIRTUALMACHINES',
+                    entry=machine
+                )
+    
+    @staticmethod
+    def _get_virtual_machines(**params) -> List[Dict[str, Any]]:
+        """Get BSD jails."""
+        if 'command' not in params:
+            params['command'] = 'jls -n'
+        
+        lines = get_all_lines(**params)
+        if not lines:
+            return []
+        
+        machines = []
+        for line in lines:
+            info = {}
+            for item in line.split():
+                if '=' in item:
+                    key, value = item.split('=', 1)
+                    info[key] = value
+            
+            if info.get('host.hostname'):
+                machine = {
+                    'VMTYPE': 'bsdjail',
+                    'NAME': info['host.hostname'],
+                    'STATUS': STATUS_RUNNING
+                }
+                
+                machines.append(machine)
+        
+        return machines

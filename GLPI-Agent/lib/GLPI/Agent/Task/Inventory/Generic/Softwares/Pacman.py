@@ -1,90 +1,113 @@
-package GLPI::Agent::Task::Inventory::Generic::Softwares::Pacman;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Generic Softwares Pacman - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, List, Dict, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_all_lines
 
-use GLPI::Agent::Tools;
 
-sub isEnabled {
-    return canRun('pacman');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $packages = _getPackagesList(
-        logger  => $logger,
-        command => 'pacman -Qqi'
-    );
-    return unless $packages;
-
-    foreach my $package (@$packages) {
-        $inventory->addEntry(
-            section => 'SOFTWARES',
-            entry   => $package
-        );
-    }
-}
-
-sub _getPackagesList {
-    my (%params) = @_;
-
-    my @lines = getAllLines(%params)
-        or return;
-
-    my @packages;
-    my $package;
-    my $index = 1;
-    my %months = map { $_ => $index ++ } qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
-
-    foreach my $line (@lines) {
-        next unless $line;
-        next unless $line =~ /^(\S[^:]*):\s*(.*)$/;
-
-        my $key   = $1;
-        my $value = $2;
-        $key =~ s/\s+$//;
-
-        if ($key eq 'Name') {
-            push @packages, $package
-                if $package;
-            $package = {
-                NAME => $value
-            };
-        } elsif ($key eq 'Version' && $value) {
-            $value =~ s/^\d+://;
-            $package->{VERSION} = $value;
-        } elsif ($key eq 'Description' && $value) {
-            $package->{COMMENTS} = $value;
-        } elsif ($key eq 'Architecture' && $value) {
-            $package->{ARCH} = $value;
-        } elsif ($key eq 'Install Date' && $value) {
-            my ($month, $day, $year) = $value =~ /^\w+\s+(\w+)\s+(\d+)\s+[\d:]+\s+(\d+)$/;
-            next unless $month && $months{$month};
-            $package->{INSTALLDATE} = sprintf("%02d/%02d/%d", $day, month($month), $year);
-        } elsif ($key eq 'Installed Size' && $value) {
-            if ($value =~ /^([\d.]+)\s+(\w+)$/) {
-                my $size =  $2 eq 'KiB' ? $1 * 1024 :
-                            $2 eq 'MiB' ? $1 * 1048576 :
-                            $2 eq 'GiB' ? $1 * 1073741824 :
-                            $1;
-                $package->{FILESIZE} = int($size);
-            }
-        } elsif ($key eq 'Groups' && $value && $value ne 'None') {
-            $package->{SYSTEM_CATEGORY} = join(',', split(/\s+/,$value));
-        }
-    }
-
-    # Add last software
-    push @packages, $package
-        if $package;
-
-    return \@packages;
-}
-
-1;
+class Pacman(InventoryModule):
+    """Pacman package inventory module (Arch Linux)."""
+    
+    MONTHS = {name: idx for idx, name in enumerate([
+        '', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ], start=0)}
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('pacman')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        packages = Pacman._get_packages_list(
+            logger=logger,
+            command='pacman -Qqi'
+        )
+        if not packages:
+            return
+        
+        for package in packages:
+            if inventory:
+                inventory.add_entry(
+                    section='SOFTWARES',
+                    entry=package
+                )
+    
+    @staticmethod
+    def _get_packages_list(**params) -> Optional[List[Dict[str, Any]]]:
+        """Get list of Pacman packages."""
+        lines = get_all_lines(**params)
+        if not lines:
+            return None
+        
+        packages = []
+        package = None
+        
+        for line in lines:
+            if not line:
+                continue
+            
+            match = re.match(r'^(\S[^:]*):\s*(.*)$', line)
+            if not match:
+                continue
+            
+            key, value = match.groups()
+            key = key.rstrip()
+            
+            if key == 'Name':
+                if package:
+                    packages.append(package)
+                package = {'NAME': value}
+            
+            elif not package:
+                continue
+            
+            elif key == 'Version' and value:
+                version = re.sub(r'^\d+:', '', value)
+                package['VERSION'] = version
+            
+            elif key == 'Description' and value:
+                package['COMMENTS'] = value
+            
+            elif key == 'Architecture' and value:
+                package['ARCH'] = value
+            
+            elif key == 'Install Date' and value:
+                date_match = re.match(r'^\w+\s+(\w+)\s+(\d+)\s+[\d:]+\s+(\d+)$', value)
+                if date_match:
+                    month_name, day, year = date_match.groups()
+                    month = Pacman.MONTHS.get(month_name)
+                    if month:
+                        package['INSTALLDATE'] = f"{int(day):02d}/{month:02d}/{year}"
+            
+            elif key == 'Installed Size' and value:
+                size_match = re.match(r'^([\d.]+)\s+(\w+)$', value)
+                if size_match:
+                    size_val, unit = size_match.groups()
+                    size_val = float(size_val)
+                    size = int(
+                        size_val * 1024 if unit == 'KiB' else
+                        size_val * 1048576 if unit == 'MiB' else
+                        size_val * 1073741824 if unit == 'GiB' else
+                        size_val
+                    )
+                    package['FILESIZE'] = size
+            
+            elif key == 'Groups' and value and value != 'None':
+                package['SYSTEM_CATEGORY'] = ','.join(value.split())
+        
+        # Add last software
+        if package:
+            packages.append(package)
+        
+        return packages

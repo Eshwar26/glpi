@@ -1,45 +1,57 @@
-package GLPI::Agent::Task::Inventory::Generic::PCI::Modems;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Generic PCI Modems - Python Implementation
+"""
 
-use strict;
-use warnings;
+import re
+from typing import Any, List, Dict
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools.Generic import get_pci_devices
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Generic;
 
-use constant    category    => "modem";
-
-sub isEnabled {
-    return 1;
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    foreach my $modem (_getModems(logger => $logger)) {
-        $inventory->addEntry(
-            section => 'MODEMS',
-            entry   => $modem
-        );
-    }
-}
-
-sub _getModems {
-    my @modems;
-
-    foreach my $device (getPCIDevices(@_)) {
-        next unless $device->{NAME} =~ /modem/i;
-        push @modems, {
-            DESCRIPTION => $device->{NAME},
-            NAME        => $device->{MANUFACTURER},
-        };
-    }
-
-    return @modems;
-}
-
-1;
+class Modems(InventoryModule):
+    """PCI modems inventory module."""
+    
+    @staticmethod
+    def category() -> str:
+        """Return the inventory category."""
+        return "modem"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return True
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        modems = Modems._get_modems(logger=logger)
+        
+        for modem in modems:
+            if inventory:
+                inventory.add_entry(
+                    section='MODEMS',
+                    entry=modem
+                )
+    
+    @staticmethod
+    def _get_modems(**params) -> List[Dict[str, str]]:
+        """Get PCI modems."""
+        modems = []
+        
+        for device in get_pci_devices(**params):
+            if not device.get('NAME'):
+                continue
+            if not re.search(r'modem', device['NAME'], re.IGNORECASE):
+                continue
+            
+            modems.append({
+                'DESCRIPTION': device['NAME'],
+                'NAME': device.get('MANUFACTURER'),
+            })
+        
+        return modems

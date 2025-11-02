@@ -1,16 +1,24 @@
-package GLPI::Agent::Task::Inventory::Linux::Distro;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Linux Distro - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
 
-use constant    category    => "os";
 
-sub isEnabled {
-    return 1;
-}
-
-sub doInventory {}
-
-1;
+class Distro(InventoryModule):
+    """Base Linux distribution detection module."""
+    
+    category = "os"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return True
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection - placeholder."""
+        pass

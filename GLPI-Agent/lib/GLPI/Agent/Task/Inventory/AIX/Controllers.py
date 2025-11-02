@@ -1,46 +1,52 @@
-package GLPI::Agent::Task::Inventory::AIX::Controllers;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory AIX Controllers - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Dict, Any, List
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run
+from GLPI.Agent.Tools.AIX import get_adapters_from_lsdev
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::AIX;
 
-use constant    category    => "controller";
-
-sub isEnabled {
-    return canRun('lsdev');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    foreach my $controller (_getControllers(
-        logger  => $logger,
-    )) {
-        $inventory->addEntry(
-            section => 'CONTROLLERS',
-            entry   => $controller
-        );
-    }
-}
-
-sub _getControllers {
-    my @adapters = getAdaptersFromLsdev(@_);
-
-    my @controllers;
-    foreach my $adapter (@adapters) {
-        push @controllers, {
-            NAME => $adapter->{NAME},
-        };
-    }
-
-    return @controllers;
-}
-
-1;
+class Controllers(InventoryModule):
+    """AIX Controllers inventory module."""
+    
+    @staticmethod
+    def category() -> str:
+        """Return the inventory category."""
+        return "controller"
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
+        return can_run('lsdev')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        controllers = Controllers._get_controllers(logger=logger)
+        
+        for controller in controllers:
+            if inventory:
+                inventory.add_entry(
+                    section='CONTROLLERS',
+                    entry=controller
+                )
+    
+    @staticmethod
+    def _get_controllers(**params) -> List[Dict[str, Any]]:
+        """Get controllers information."""
+        adapters = get_adapters_from_lsdev(**params)
+        
+        controllers = []
+        for adapter in adapters:
+            controllers.append({
+                'NAME': adapter.get('NAME'),
+            })
+        
+        return controllers

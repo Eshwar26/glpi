@@ -1,152 +1,137 @@
-package GLPI::Agent::Task::Inventory::Virtualization::Virtuozzo;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Virtualization Virtuozzo - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any, Dict, List, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_all_lines, get_first_match
+from GLPI.Agent.Tools.Network import mac_address_pattern
+from GLPI.Agent.Tools.Virtualization import STATUS_RUNNING, STATUS_PAUSED, STATUS_OFF
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Network;
-use GLPI::Agent::Tools::Virtualization;
 
-sub isEnabled {
-    # Avoid duplicated entry with libvirt
-    return if canRun('virsh');
+class Virtuozzo(InventoryModule):
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        # Avoid duplicated entry with libvirt
+        if can_run('virsh'):
+            return False
+        return can_run('vzlist')
 
-    return canRun('vzlist');
-}
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        inventory = params.get('inventory')
+        logger = params.get('logger')
 
-sub doInventory {
-    my (%params) = @_;
+        for vz in Virtuozzo._parse_vzlist(inventory=inventory, logger=logger):
+            if inventory:
+                inventory.add_entry(section='VIRTUALMACHINES', entry=vz)
 
-    my $inventory = $params{inventory};
+    @staticmethod
+    def _parse_vzlist(**params) -> List[Dict[str, Any]]:
+        inventory = params.get('inventory')
+        logger = params.get('logger')
 
-    foreach my $vz (@{_parseVzlist(%params)}) {
-        $inventory->addEntry(
-            section => 'VIRTUALMACHINES',
-            entry => $vz
-        );
-    }
-}
+        lines = get_all_lines(
+            command='vzlist --all --no-header -o hostname,ctid,cpulimit,status,ostemplate',
+            logger=logger,
+        ) or []
+        if not lines:
+            return []
 
-sub _parseVzlist {
-    my (%params) = @_;
+        confctid_template = params.get('ctid_template') or '/etc/vz/conf/__XXX__.conf'
 
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
+        host_id = ''
+        try:
+            host_id = inventory.getHardware('UUID') if inventory else ''
+        except Exception:
+            host_id = ''
 
-    my @lines = getAllLines(
-        command => 'vzlist --all --no-header -o hostname,ctid,cpulimit,status,ostemplate',
-        %params
-    );
-
-    return unless @lines;
-
-    my $vzlist;
-    my $confctid_template = $params{ctid_template} ||
-        "/etc/vz/conf/__XXX__.conf";
-
-    my $hostID = $inventory->getHardware('UUID') || '';
-
-    my %status_list = (
-        'stopped'   => STATUS_OFF,
-        'running'   => STATUS_RUNNING,
-        'paused'    => STATUS_PAUSED,
-        'mounted'   => STATUS_OFF,
-        'suspended' => STATUS_PAUSED,
-        'unknown'   => STATUS_OFF,
-    );
-
-    foreach my $line (@lines) {
-        my ($name, $ctid, $cpus, $status, $subsys) = split(/[ \t]+/, $line);
-
-        my $ctid_conf = $confctid_template;
-        $ctid_conf =~ s/__XXX__/$ctid/;
-
-        my $memory = getFirstMatch(
-            file    => $ctid_conf,
-            pattern => qr/^SLMMEMORYLIMIT="\d+:(\d+)"$/,
-            logger  => $logger,
-        );
-        if ($memory) {
-            $memory = $memory / 1024 / 1024;
-        } else {
-            $memory = getFirstMatch(
-                file    => $ctid_conf,
-                pattern => qr/^PRIVVMPAGES="\d+:(\d+)"$/,
-                logger  => $logger,
-            );
-            if ($memory) {
-                $memory = $memory * 4 / 1024;
-            } else {
-                $memory = getFirstMatch(
-                    file    => $ctid_conf,
-                    pattern => qr/^PHYSPAGES="\d+:(\d+\w{0,1})"$/,
-                    logger  => $logger,
-                );
-                if ($memory) {
-                    $memory =~ /(\d+)(\w{0,1})/;
-                    if ($2 eq "M") {
-                        $memory=$1;
-                    } elsif ($2 eq "G") {
-                        $memory=$1*1024;
-                    } elsif ($2 eq "K") {
-                        $memory=$1/1024;
-                    } else {
-                        $memory=$1/1024/1024;
-                    }
-                }
-            }
+        status_list = {
+            'stopped': STATUS_OFF,
+            'running': STATUS_RUNNING,
+            'paused': STATUS_PAUSED,
+            'mounted': STATUS_OFF,
+            'suspended': STATUS_PAUSED,
+            'unknown': STATUS_OFF,
         }
 
-        # compute specific identifier for the guest, as CTID is
-        # unique only for the local hosts
-        my $uuid = $hostID . '-' . $ctid;
+        result: List[Dict[str, Any]] = []
+        for line in lines:
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            name, ctid, cpus, status, subsys = parts[0], parts[1], parts[2], parts[3], parts[4]
 
-        $status = $status_list{$status} || STATUS_OFF;
+            ctid_conf = confctid_template.replace('__XXX__', ctid)
 
-        my $container = {
-            NAME      => $name,
-            VCPU      => $cpus,
-            UUID      => $uuid,
-            MEMORY    => $memory,
-            STATUS    => $status,
-            SUBSYSTEM => $subsys,
-            VMTYPE    => "virtuozzo",
-        };
+            memory = get_first_match(file=ctid_conf, pattern=r'^SLMMEMORYLIMIT="\d+:(\d+)"$', logger=logger)
+            if memory:
+                try:
+                    memory = int(memory) / 1024 / 1024
+                except Exception:
+                    memory = None
+            else:
+                memory = get_first_match(file=ctid_conf, pattern=r'^PRIVVMPAGES="\d+:(\d+)"$', logger=logger)
+                if memory:
+                    try:
+                        memory = int(memory) * 4 / 1024
+                    except Exception:
+                        memory = None
+                else:
+                    memory = get_first_match(file=ctid_conf, pattern=r'^PHYSPAGES="\d+:(\d+\w{0,1})"$', logger=logger)
+                    if memory:
+                        import re
+                        m = re.match(r'^(\d+)(\w{0,1})$', str(memory))
+                        if m:
+                            num = int(m.group(1))
+                            unit = m.group(2)
+                            if unit == 'M':
+                                memory = num
+                            elif unit == 'G':
+                                memory = num * 1024
+                            elif unit == 'K':
+                                memory = num / 1024
+                            else:
+                                memory = num / 1024 / 1024
 
-        my $mac = _getMACs(
-            status  => $status,
-            ctid    => $ctid,
-            logger  => $logger
-        );
-        $container->{MAC} = $mac if $mac;
+            uuid = f"{host_id}-{ctid}" if host_id else ctid
+            status_norm = status_list.get(status, STATUS_OFF)
 
-        push @{$vzlist}, $container;
-    }
+            container: Dict[str, Any] = {
+                'NAME': name,
+                'VCPU': cpus,
+                'UUID': uuid,
+                'MEMORY': memory,
+                'STATUS': status_norm,
+                'SUBSYSTEM': subsys,
+                'VMTYPE': 'virtuozzo',
+            }
 
-    return $vzlist;
-}
+            mac = Virtuozzo._get_macs(status=status_norm, ctid=ctid, logger=logger)
+            if mac:
+                container['MAC'] = mac
 
-sub _getMACs {
-    my (%params) = @_;
+            result.append(container)
 
-    # Don't try to run a command in a not running container
-    return unless $params{status} && $params{status} eq STATUS_RUNNING;
+        return result
 
-    my @ipLines = getAllLines(
-        command => "vzctl exec '$params{ctid}' 'ip -0 a'",
-        %params
-    );
+    @staticmethod
+    def _get_macs(**params) -> Optional[str]:
+        status = params.get('status')
+        ctid = params.get('ctid')
+        logger = params.get('logger')
 
-    my @macs;
-    foreach my $line (@ipLines) {
-        next unless $line =~ /^\s+link\/ether ($mac_address_pattern)\s/;
-        push @macs, $1;
-    }
+        if not status or status != STATUS_RUNNING:
+            return None
 
-    return join('/', @macs);
-}
+        lines = get_all_lines(command=f"vzctl exec '{ctid}' 'ip -0 a'", logger=logger) or []
+        macs: List[str] = []
+        import re
+        for line in lines:
+            m = re.match(rf'^\s+link/ether ({mac_address_pattern})\s', line, re.IGNORECASE)
+            if m:
+                macs.append(m.group(1))
+        return '/'.join(macs) if macs else None
 
-
-1;

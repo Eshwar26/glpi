@@ -1,26 +1,26 @@
-package GLPI::Agent::SOAP::WsMan::OperationTimeout;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
+class OperationTimeout(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::OperationTimeout
+    WSMan OperationTimeout node handling.
+    """
+    xmlns = 'w'
+    
+    def __init__(self, timeout):
+        """
+        Initialize an OperationTimeout node with a timeout value.
+        
+        Args:
+            timeout: The timeout value in seconds (can be float)
+        """
+        # Format timeout as ISO 8601 duration format (PT[seconds]S)
+        formatted_timeout = f"PT{timeout:.3f}S"
+        
+        # Call parent constructor with formatted timeout string
+        super().__init__(formatted_timeout)
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    OperationTimeout;
-
-use parent
-    'Node';
-
-use constant    xmlns   => 'w';
-
-sub new {
-    my ($class, $timeout) = @_;
-
-    my $self = $class->SUPER::new(sprintf("PT%.3fS", $timeout));
-
-    bless $self, $class;
-    return $self;
-}
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.

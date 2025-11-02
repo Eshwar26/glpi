@@ -1,24 +1,20 @@
-package GLPI::Agent::SOAP::WsMan::ReceiveResponse;
+# Assuming the following are imported or defined elsewhere:
+# from glpi.agent.soap.wsman.node import Node
 
-use strict;
-use warnings;
+class ReceiveResponse(Node):
+    """
+    Equivalent to GLPI::Agent::SOAP::WsMan::ReceiveResponse
+    WSMan ReceiveResponse node handling.
+    """
+    xmlns = 'rsp'
+    
+    @staticmethod
+    def support():
+        return {
+            'Stream': "rsp:Stream",
+            'CommandState': "rsp:CommandState",
+        }
 
-use GLPI::Agent::SOAP::WsMan::Node;
 
-## no critic (ProhibitMultiplePackages)
-package
-    ReceiveResponse;
-
-use parent
-    'Node';
-
-use constant    xmlns   => 'rsp';
-
-sub support {
-    return {
-        Stream          => "rsp:Stream",
-        CommandState    => "rsp:CommandState",
-    };
-}
-
-1;
+# Note: The package structure is handled by module imports.
+# xmlns is a class attribute.

@@ -1,53 +1,51 @@
-package GLPI::Agent::Task::Inventory::Generic::Firewall::Ufw;
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Generic Firewall Ufw - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_first_match
+from GLPI.Agent.Tools.Constants import STATUS_ON, STATUS_OFF
 
-use GLPI::Agent::Tools::Constants;
-use GLPI::Agent::Tools;
 
-sub isEnabled {
-    return
+class Ufw(InventoryModule):
+    """UFW firewall inventory module."""
+    
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        """Check if module should be enabled."""
         # Ubuntu
-        canRun('ufw');
-}
-
-sub doInventory {
-    my (%params) = @_;
-
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
-
-    my $firewallStatus = _getFirewallStatus(
-        logger => $logger
-    );
-    $inventory->addEntry(
-        section => 'FIREWALL',
-        entry   => {
-            DESCRIPTION => "ufw",
-            STATUS      => $firewallStatus
-        }
-    );
-
-}
-
-sub _getFirewallStatus {
-    my (%params) = @_;
-
-    my $status = getFirstMatch(
-        command => 'ufw status',
-        pattern => qr/^Status:\s*(\w+)$/,
-        %params
-    );
-    if ($status && $status eq 'active') {
-        $status = STATUS_ON;
-    } else {
-        $status = STATUS_OFF;
-    }
-
-    return $status;
-}
-
-1;
+        return can_run('ufw')
+    
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        """Perform inventory collection."""
+        inventory = params.get('inventory')
+        logger = params.get('logger')
+        
+        firewall_status = Ufw._get_firewall_status(logger=logger)
+        
+        if inventory:
+            inventory.add_entry(
+                section='FIREWALL',
+                entry={
+                    'DESCRIPTION': 'ufw',
+                    'STATUS': firewall_status
+                }
+            )
+    
+    @staticmethod
+    def _get_firewall_status(**params) -> str:
+        """Get UFW firewall status."""
+        status = get_first_match(
+            command='ufw status',
+            pattern=r'^Status:\s*(\w+)$',
+            **params
+        )
+        
+        if status and status == 'active':
+            return STATUS_ON
+        else:
+            return STATUS_OFF

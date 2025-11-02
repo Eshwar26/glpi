@@ -1,87 +1,70 @@
-package GLPI::Agent::Task::Inventory::Virtualization::VmWareDesktop;
-#
-# initial version: Walid Nouh
-#
+#!/usr/bin/env python3
+"""
+GLPI Agent Task Inventory Virtualization VMware Desktop - Python Implementation
+"""
 
-use strict;
-use warnings;
+from typing import Any, Dict, List, Optional
 
-use parent 'GLPI::Agent::Task::Inventory::Module';
+from GLPI.Agent.Task.Inventory.Module import InventoryModule
+from GLPI.Agent.Tools import can_run, get_all_lines, has_file
 
-use GLPI::Agent::Tools;
-use GLPI::Agent::Tools::Virtualization;
 
-sub isEnabled {
-    return
-        canRun('/Library/Application Support/VMware Fusion/vmrun') ||
-        canRun('vmrun');
-}
+class VmWareDesktop(InventoryModule):
+    @staticmethod
+    def isEnabled(**params: Any) -> bool:
+        return can_run('/Library/Application Support/VMware Fusion/vmrun') or can_run('vmrun')
 
-sub doInventory {
-    my (%params) = @_;
+    @staticmethod
+    def doInventory(**params: Any) -> None:
+        inventory = params.get('inventory')
+        logger = params.get('logger')
 
-    my $inventory = $params{inventory};
-    my $logger    = $params{logger};
+        command = 'vmrun list' if can_run('vmrun') else "'/Library/Application Support/VMware Fusion/vmrun' list"
+        for machine in VmWareDesktop._get_machines(command=command, logger=logger):
+            if inventory:
+                inventory.add_entry(section='VIRTUALMACHINES', entry=machine)
 
-    my $command = canRun('vmrun') ?
-        'vmrun list' : "'/Library/Application Support/VMware Fusion/vmrun' list";
+    @staticmethod
+    def _get_machines(**params) -> List[Dict[str, Any]]:
+        lines = get_all_lines(**params) or []
+        if not lines:
+            return []
+        # skip first line
+        lines = lines[1:]
 
-    foreach my $machine (_getMachines(
-        command => $command, logger => $logger
-    )) {
-        $inventory->addEntry(
-            section => 'VIRTUALMACHINES', entry => $machine
-        );
-    }
-}
+        machines: List[Dict[str, Any]] = []
+        logger = params.get('logger')
+        for line in lines:
+            path = line.strip()
+            if not path or not has_file(path):
+                continue
+            info = VmWareDesktop._get_machine_info(file=path, logger=logger)
+            if not info:
+                continue
+            machines.append({
+                'NAME': info.get('displayName'),
+                'VCPU': 1,
+                'UUID': info.get('uuid.bios'),
+                'MEMORY': info.get('memsize'),
+                'STATUS': 'running',
+                'SUBSYSTEM': 'VmWare Fusion',
+                'VMTYPE': 'VmWare',
+            })
+        return machines
 
-sub _getMachines {
-    my (%params) = @_;
+    @staticmethod
+    def _get_machine_info(**params) -> Optional[Dict[str, Any]]:
+        lines = get_all_lines(**params) or []
+        if not lines:
+            return None
+        info: Dict[str, Any] = {}
+        import re
+        for line in lines:
+            m = re.match(r'^(\S+)\s*=\s*(\S+.*)', line)
+            if not m:
+                continue
+            key, value = m.group(1), m.group(2)
+            value = value.strip('"')
+            info[key] = value
+        return info
 
-    my @lines = getAllLines(%params)
-        or return;
-
-    # skip first line
-    shift @lines;
-
-    my @machines;
-    foreach my $line (@lines) {
-        next unless has_file($line);
-
-        my %info = _getMachineInfo(file => $line, logger => $params{logger});
-
-        my $machine = {
-            NAME      => $info{'displayName'},
-            VCPU      => 1,
-            UUID      => $info{'uuid.bios'},
-            MEMORY    => $info{'memsize'},
-            STATUS    => STATUS_RUNNING,
-            SUBSYSTEM => "VmWare Fusion",
-            VMTYPE    => "VmWare",
-        };
-
-        push @machines, $machine;
-    }
-
-    return @machines;
-}
-
-sub _getMachineInfo {
-    my (%params) = @_;
-
-    my @lines = getAllLines(%params)
-        or return;
-
-    my %info;
-    foreach my $line (@lines) {
-        next unless $line =~ /^(\S+)\s*=\s*(\S+.*)/;
-        my $key = $1;
-        my $value = $2;
-        $value =~ s/(^"|"$)//g;
-        $info{$key} = $value;
-    }
-
-    return %info;
-}
-
-1;
