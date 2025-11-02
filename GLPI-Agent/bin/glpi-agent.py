@@ -20,34 +20,35 @@ sys.path.insert(0, './lib')
 
 try:
     import setup
-    sys.path.insert(0, setup.libdir)
-    SETUP_CONFIG = {k: v for k, v in setup.__dict__.items() if not k.startswith('_')}
+    sys.path.insert(0, setup.setup.get('libdir', './lib'))
+    # Only include the setup dictionary, not all module attributes
+    SETUP_CONFIG = setup.setup.copy()
 except ImportError:
     print("Error: Could not import setup module", file=sys.stderr)
     sys.exit(1)
 
 # Import GLPI modules with proper error handling
 try:
-    from glpi.agent import GLPIAgent, VERSION_STRING, COMMENTS
+    from GLPI.Agent import GLPIAgent, VERSION_STRING, COMMENTS
     GLPI_AGENT_AVAILABLE = True
 except ImportError as e:
     print(f"Error: Could not import GLPI Agent module: {e}", file=sys.stderr)
     GLPI_AGENT_AVAILABLE = False
 
 try:
-    from glpi.agent.daemon import GLPIAgentDaemon
+    from GLPI.Agent.Daemon import GLPIAgentDaemon
     DAEMON_AVAILABLE = True
 except ImportError:
     DAEMON_AVAILABLE = False
 
 try:
-    from glpi.agent.event import GLPIAgentEvent
+    from GLPI.Agent.Event import Event as GLPIAgentEvent
     EVENT_AVAILABLE = True
 except ImportError:
     EVENT_AVAILABLE = False
 
 try:
-    from glpi.agent.task.inventory import GLPIAgentTaskInventory
+    from GLPI.Agent.Task.Inventory import InventoryTask as GLPIAgentTaskInventory
     INVENTORY_TASK_AVAILABLE = True
 except ImportError:
     INVENTORY_TASK_AVAILABLE = False
@@ -355,13 +356,16 @@ Execution mode options:
             print("Error: GLPI Agent not available", file=sys.stderr)
             sys.exit(1)
             
+        # For --setup, we don't need to fully initialize the agent
+        # Just create it and print the setup directories
         agent = GLPIAgent(**self.setup_config)
-        options = {'debug': 0}
-        agent.init(options=options)
         
-        # Get setup info including vardir from initialized agent
-        setup_info = dict(self.setup_config)
-        setup_info['vardir'] = getattr(agent, 'vardir', 'N/A')
+        # Get setup info from agent attributes (before init)
+        setup_info = {
+            'datadir': agent.datadir or self.setup_config.get('datadir', './share'),
+            'libdir': agent.libdir or self.setup_config.get('libdir', './lib'),
+            'vardir': agent.vardir or self.setup_config.get('vardir', './var'),
+        }
         
         # Format exactly like Perl - right-aligned colons
         if setup_info:
@@ -469,7 +473,7 @@ Execution mode options:
         if (platform.system() == 'Windows' and 
             not self.options.get('no_win32_ole_workaround')):
             try:
-                from glpi.agent.tools.win32 import (
+                from GLPI.Agent.Tools.Win32 import (
                     start_win32_ole_worker,
                     setup_worker_logger
                 )

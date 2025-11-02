@@ -1,0 +1,22 @@
+# GLPI Agent Python Dependencies
+# Core dependencies required for basic functionality
+
+# HTTP client for server communication
+requests>=2.25.0
+
+# Optional dependencies (required for specific features)
+# SNMP support (for network inventory/discovery)
+# pysnmp>=4.4.12
+
+# Network interface detection
+# netifaces>=0.11.0
+
+# JSON schema validation (for inventory validation)
+# jsonschema>=3.2.0
+
+# Cryptography support (for SNMPv3 and other security features)
+# pycryptodome>=3.10.0
+
+# Note: Uncomment the optional dependencies above if you need those features.
+# Most basic inventory tasks will work with just 'requests' installed.
+

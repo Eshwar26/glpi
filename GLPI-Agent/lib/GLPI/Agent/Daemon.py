@@ -433,7 +433,7 @@ class GLPIAgentDaemon:  # Should inherit from GLPIAgent if implemented
         return False
 
 # Example usage (main block)
-if _name_ == "_main_":
+if __name__ == "__main__":
     # config = GLPIAgentConfig(options={...})
     # logger = GLPIAgentLogger()
     # daemon = GLPIAgentDaemon(config, logger)
